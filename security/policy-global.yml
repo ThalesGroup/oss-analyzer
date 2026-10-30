@@ -1,0 +1,172 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# =============================================================================
+#  Security and compliance policy: thresholds, modes, exceptions, settings.
+#  One of oss-analyzer's settings files, all named policy-<facet> in one
+#  folder: policy-global.yml, policy-licenses.yml (license lists),
+#  policy-semgrep.yml (SAST rules), policy-gitleaks.toml (secrets rules).
+#  These are the organization defaults; a project's own files, each
+#  optional, complete them (see the README's "Customizing oss-analyzer").
+#  Resolved by scripts/prepare_settings.py (the component's osa_prepare
+#  job), then applied by license_gate.py and aggregate_report.py.
+# =============================================================================
+
+meta:
+  # Settings format version: checked, a policy declaring another one is
+  # refused (see the CHANGELOG when it changes). Optional in a project's
+  # policy.
+  version: 1
+  # Informational only (no script reads it): who maintains these settings.
+  owner: "security-team@example.com"
+
+  # How the software is distributed:
+  #   saas          → the code runs on your servers, no binary is shipped
+  #   distributed   → binary / container / app shipped to the customer
+  #   oss_library   → library published as Open Source
+  # The CI/CD component's OSA_DISTRIBUTION_MODEL input overrides it.
+  # Shown in the reports. It changes no verdict unless the policy has
+  # licenses.by_distribution_model rules (see below): the organization base
+  # has none, the same lists apply whatever the model.
+  distribution_model: saas
+
+  # This file is the CI/CD component's organization base policy (embedded in
+  # the oss-analyzer image). A project's own security/policy-global.yml only
+  # needs its differences, merged on top (see security/scripts/policy.py).
+  # Set `inherit: false` in a project's policy to apply it alone, with no
+  # base.
+  # inherit: true
+
+# Blocking or reporting-only, per category: each of vulnerabilities, sast,
+# secrets and licenses accepts `mode: enforce | audit`. In audit mode, what
+# would block is reported ("would block in enforce mode") but never fails
+# the pipeline — for onboarding a project with a backlog. Without a
+# category `mode`, the CI/CD component's OSA_MODE input applies (default
+# enforce).
+
+# -----------------------------------------------------------------------------
+# VULNERABILITIES
+# -----------------------------------------------------------------------------
+vulnerabilities:
+  # Minimum severity that blocks the pipeline: critical | high | medium | low | none
+  fail_on: high
+
+  # Doesn't fail on a vulnerability with no published fix
+  # (nothing can be done except track it — Dependency-Track handles that).
+  ignore_unfixed: true
+
+  # Exceptions: every entry needs an `expires` date (unquoted YAML date):
+  # one without it, or expired, is ignored and the finding blocks again.
+  # `reason` and `approved_by` aren't checked by the scripts: they're for
+  # the merge request review, which should refuse an entry without them.
+  exceptions:
+    # - id: CVE-2024-12345
+    #   reason: "Vulnerable function never reached — reachability analysis from 03/12"
+    #   approved_by: "first.last"
+    #   expires: 2026-12-31
+    - id: GHSA-cxww-7g56-2vh6
+      reason: >-
+        Structural false positive, not a real exposure: Syft's
+        github-actions-usage-cataloger reads the *literal* ref used in
+        `uses: actions/download-artifact@v4` (the floating major tag
+        "v4"), not the version GitHub actually resolves it to at run
+        time. GHSA-cxww-7g56-2vh6 covers 4.0.0-4.1.2 (fixed in 4.1.3);
+        `@v4` has pointed at a patched release for a long time and
+        auto-updates as new patches ship. Pinning to a SHA instead
+        would silence this finding but lose that automatic security
+        update — not worth it for a cataloging artifact, not a real
+        vulnerable version in use.
+      approved_by: "oss-analyzer maintainers"
+      expires: 2027-03-01
+
+# -----------------------------------------------------------------------------
+# SECRETS
+# -----------------------------------------------------------------------------
+secrets:
+  # Any detected secret blocks: there's no "low severity" here.
+  fail_on_any: true
+
+  # Gitleaks rules and allowlist: policy-gitleaks.toml. A project's own
+  # policy-gitleaks.toml extends oss-analyzer's (keep it free of [extend]:
+  # the component adds it); false uses the project's file alone.
+  inherit_rules: true
+
+# -----------------------------------------------------------------------------
+# SAST
+# -----------------------------------------------------------------------------
+sast:
+  # Minimum severity that blocks, for Semgrep findings (ERROR → high,
+  # WARNING → medium, INFO → low) and Trivy IaC misconfigurations alike.
+  fail_on: high
+
+  # In-house Semgrep rules: policy-semgrep.yml. A project's own
+  # policy-semgrep.yml runs in addition to oss-analyzer's; false runs the
+  # project's rules alone (the registry rule packs still run).
+  inherit_rules: true
+  # IDs of oss-analyzer's rules to drop, e.g. [go-ignored-error]. To
+  # replace one, drop it here and write your own under another ID.
+  disabled_rules: []
+  # Semgrep registry rule packs, run in addition to the rules above
+  # (downloaded from the registry: see the README's "Known pitfalls" for a
+  # runner without internet). A project's list replaces this one.
+  registry_packs: [p/default, p/security-audit, p/secrets, p/golang, p/rust,
+                   p/java, p/python, p/typescript, p/c]
+
+# -----------------------------------------------------------------------------
+# LICENSES
+# -----------------------------------------------------------------------------
+licenses:
+  # Component whose license isn't in any list: allow | review | deny
+  unknown: review
+
+  fail_on_deny: true
+  # true blocks on every `review` license too: with the default lists,
+  # that's the only way to block strong copyleft (GPL, AGPL) and
+  # source-available (SSPL) licenses, and it also blocks every other
+  # `review` one (MPL, LGPL, EPL...).
+  fail_on_review: false
+
+  # The allow / review / deny lists: policy-licenses.yml (next to this
+  # file), a generic baseline — see that file's header for how licenses
+  # are classified. allow /
+  # review / deny lists written here, or in a project's policy-global.yml or
+  # policy-licenses.yml, reclassify the licenses they name on top of it.
+  # Optional: a policy-licenses.yml next to a policy is pulled in without
+  # this key; set it only to use another file name.
+  lists_file: policy-licenses.yml
+
+  # Per distribution model: none in the organization base, the same lists
+  # apply whatever the model. A project may reclassify licenses for one
+  # model in its own policy (a license listed there leaves its list; IDs
+  # compared normalized, as everywhere), applied after the merge for the
+  # model in use, e.g.:
+  # by_distribution_model:
+  #   distributed:
+  #     deny: [GPL-3.0-only, GPL-3.0-or-later]
+
+  # Targeted exceptions: the package is allowed whatever its license(s).
+  # `package` accepts a full purl, `name` or `name@version`. `expires` works
+  # as for vulnerabilities (required, unquoted date). `license`, `reason`
+  # and `approved_by` aren't checked: they document the decision for the
+  # merge request review.
+  exceptions:
+    # - package: "pkg:npm/some-gpl-tool@2.1.0"
+    #   license: GPL-3.0-only
+    #   reason: "Build tool only — never shipped in the delivered artifact"
+    #   approved_by: "first.last"
+    #   expires: 2027-01-01
+
+# -----------------------------------------------------------------------------
+# LICENSE HEADERS (REUSE — https://reuse.software/)
+# -----------------------------------------------------------------------------
+# Intentionally no fail_on/gate key here: this checks that the SCANNED
+# repo's own files carry a proper SPDX-FileCopyrightText/SPDX-License-
+# Identifier header (unrelated to the `licenses:` section above, which is
+# about third-party dependency licenses). Always non-blocking, by
+# design — a sensitization signal for whatever project this pipeline
+# scans (most won't have adopted REUSE), not a compliance gate.
+# aggregate_report.py treats every REUSE finding as non-blocking
+# unconditionally — nothing here can turn it into a gate.
+# This repo (oss-analyzer) applies REUSE itself — see LICENSE, LICENSES/,
+# and the per-file headers.

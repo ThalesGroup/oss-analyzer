@@ -1,0 +1,325 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# oss-analyzer's in-house Semgrep rules — complement the registry rule packs.
+# A project's own security/policy-semgrep.yml runs in addition to these;
+# `sast.disabled_rules` in its policy-global.yml drops some of them, and
+# `sast.inherit_rules: false` runs the project's rules alone.
+# Validate: semgrep scan --validate --config security/policy-semgrep.yml
+# (no rule test targets in this repository, so `semgrep --test` finds none)
+# Docs: https://semgrep.dev/docs/writing-rules/overview
+
+rules:
+  # ---------------------------------------------------------------- Go -------
+  - id: go-sql-string-concat
+    languages: [go]
+    severity: ERROR
+    message: >-
+      SQL query built via concatenation: possible injection.
+      Use bound parameters (`?` / `$1`) rather than fmt.Sprintf.
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: $DB.Query(fmt.Sprintf(...), ...)
+          - pattern: $DB.QueryRow(fmt.Sprintf(...), ...)
+          - pattern: $DB.Exec(fmt.Sprintf(...), ...)
+          - pattern: $DB.QueryContext($CTX, fmt.Sprintf(...), ...)
+
+  - id: go-ignored-error
+    languages: [go]
+    severity: WARNING
+    message: >-
+      Error explicitly ignored. If this is intentional, document why
+      just above the line.
+    metadata:
+      category: correctness
+    patterns:
+      - pattern: |
+          _ = $F(...)
+      - pattern-not-inside: |
+          defer func() { ... }()
+
+  - id: go-tls-verification-disabled
+    languages: [go]
+    severity: ERROR
+    message: "TLS certificate verification disabled."
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      category: security
+    pattern: |
+      tls.Config{..., InsecureSkipVerify: true, ...}
+
+  # -------------------------------------------------------------- Rust -------
+  - id: rust-unwrap-in-library
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      `unwrap()` / `expect()` triggers a panic. In library code,
+      prefer propagation via `?` or an explicit error type.
+    metadata:
+      category: correctness
+    patterns:
+      - pattern-either:
+          - pattern: $E.unwrap()
+          - pattern: $E.expect(...)
+      - pattern-not-inside: |
+          #[test]
+          fn $F(...) { ... }
+      - pattern-not-inside: |
+          #[cfg(test)]
+          mod $M { ... }
+
+  - id: rust-unsafe-block-undocumented
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      `unsafe` block with no `// SAFETY:` comment justifying the invariants.
+    metadata:
+      category: security
+    patterns:
+      - pattern: unsafe { ... }
+      - pattern-not-inside: |
+          // SAFETY: ...
+          ...
+
+  # -------------------------------------------------------------- Java -------
+  - id: java-runtime-exec-tainted
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Dynamically built system command: command injection.
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+    pattern-either:
+      - pattern: Runtime.getRuntime().exec($X + $Y)
+      - pattern: Runtime.getRuntime().exec(String.format(...))
+      - pattern: new ProcessBuilder($X + $Y)
+
+  - id: java-insecure-deserialization
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Native Java deserialization of an untrusted source: possible RCE.
+      Prefer a schema-based data format (JSON, protobuf).
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      category: security
+    pattern: new ObjectInputStream($IN).readObject()
+
+  - id: java-weak-hash
+    languages: [java]
+    severity: ERROR
+    message: "Obsolete hashing algorithm — use SHA-256 or better."
+    metadata:
+      cwe: "CWE-327: Broken Crypto"
+      category: security
+    patterns:
+      - pattern: MessageDigest.getInstance("=~/(?i)(md5|sha-?1)/")
+
+  # ------------------------------------------------------------- Python ------
+  - id: python-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `shell=True` with a non-literal command: command injection.
+      Pass a list of arguments instead.
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$M(..., shell=True, ...)
+          - pattern: os.system($CMD)
+      - pattern-not: subprocess.$M("...", ..., shell=True, ...)
+
+  - id: python-yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: "`yaml.load` without SafeLoader allows arbitrary object instantiation."
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      category: security
+    patterns:
+      - pattern: yaml.load($X)
+      - pattern-not: yaml.load($X, Loader=yaml.SafeLoader)
+      - pattern-not: yaml.load($X, yaml.SafeLoader)
+
+  - id: python-jwt-decode-unverified
+    languages: [python]
+    severity: ERROR
+    message: "JWT decoded without signature verification."
+    metadata:
+      cwe: "CWE-347: Improper Verification of Cryptographic Signature"
+      category: security
+    pattern-either:
+      - pattern: jwt.decode(..., verify=False, ...)
+      - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+
+  # ------------------------------------------------- JavaScript / TypeScript -
+  - id: js-child-process-template-literal
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Shell command built via interpolation: command injection.
+      Use `execFile` with an argument array.
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+    pattern-either:
+      - pattern: child_process.exec(`...${$X}...`, ...)
+      - pattern: exec(`...${$X}...`, ...)
+
+  - id: js-dangerously-set-inner-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      `dangerouslySetInnerHTML` with a dynamic value: XSS.
+      Sanitize with DOMPurify before injecting.
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      category: security
+    patterns:
+      - pattern: '<$EL dangerouslySetInnerHTML={{__html: $X}} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{__html: DOMPurify.sanitize(...)}} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{__html: "..."}} />'
+
+  - id: js-hardcoded-jwt-secret
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Hardcoded JWT signing secret — load it from the environment instead."
+    metadata:
+      cwe: "CWE-798: Hard-coded Credentials"
+      category: security
+    pattern-either:
+      - pattern: jwt.sign($PAYLOAD, "...", ...)
+      - pattern: jwt.verify($TOKEN, "...", ...)
+
+  # ------------------------------------------------------------- C / C++ -----
+  - id: c-dangerous-string-function
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      Function with no destination size check: possible buffer overflow.
+      Prefer strlcpy/strncpy/snprintf (C) or
+      std::string/std::span (C++).
+    metadata:
+      cwe: "CWE-120: Buffer Copy without Checking Size of Input"
+      category: security
+    pattern-either:
+      - pattern: strcpy(...)
+      - pattern: strcat(...)
+      - pattern: sprintf(...)
+      - pattern: gets(...)
+      - pattern: vsprintf(...)
+
+  - id: c-format-string-non-literal
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      Non-literal format string: if it comes from user input,
+      allows arbitrary read/write (`%n`, memory leak).
+      Always pass a literal as the first argument.
+    metadata:
+      cwe: "CWE-134: Use of Externally-Controlled Format String"
+      category: security
+    pattern-either:
+      - pattern: printf($FMT, ...)
+      - pattern: fprintf($STREAM, $FMT, ...)
+      - pattern: sprintf($DEST, $FMT, ...)
+      - pattern: snprintf($DEST, $SIZE, $FMT, ...)
+      - pattern: syslog($PRIO, $FMT, ...)
+    pattern-not:
+      - pattern: printf("...", ...)
+      - pattern: fprintf($STREAM, "...", ...)
+      - pattern: sprintf($DEST, "...", ...)
+      - pattern: snprintf($DEST, $SIZE, "...", ...)
+      - pattern: syslog($PRIO, "...", ...)
+
+  - id: c-malloc-unchecked
+    languages: [c]
+    severity: WARNING
+    message: >-
+      malloc/calloc/realloc return value unchecked before use: possible
+      NULL dereference if the allocation fails.
+    metadata:
+      cwe: "CWE-690: Unchecked Return Value to NULL Pointer Dereference"
+      category: correctness
+    patterns:
+      - pattern-either:
+          - pattern: $P = malloc(...);
+          - pattern: $P = calloc(...);
+          - pattern: $P = realloc(...);
+      - pattern-not-inside: |
+          $P = malloc(...);
+          if (...) { ... }
+      - pattern-not-inside: |
+          $P = calloc(...);
+          if (...) { ... }
+      - pattern-not-inside: |
+          $P = realloc(...);
+          if (...) { ... }
+      - pattern-not-inside: |
+          if (($P = malloc(...)) ...) { ... }
+      - pattern-not-inside: |
+          if (($P = calloc(...)) ...) { ... }
+      - pattern-not-inside: |
+          if (($P = realloc(...)) ...) { ... }
+
+  - id: cpp-delete-without-null
+    languages: [cpp]
+    severity: WARNING
+    message: >-
+      Pointer not reset to nullptr after delete: risk of use-after-free
+      if the pointer is reused or deleted again later in the function.
+    metadata:
+      cwe: "CWE-416: Use After Free"
+      category: security
+    patterns:
+      - pattern: delete $P;
+      - pattern-not-inside: |
+          delete $P;
+          $P = nullptr;
+      - pattern-not-inside: |
+          delete $P;
+          $P = NULL;
+
+  - id: c-system-tainted
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      Dynamically built command passed to system()/popen():
+      shell command injection.
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+    pattern-either:
+      - pattern: system($CMD)
+      - pattern: popen($CMD, ...)
+    pattern-not:
+      - pattern: system("...")
+      - pattern: popen("...", ...)
+
+  # ------------------------- TLS certificate verification (Python, JS/TS) ----
+  - id: disabled-cert-verification-python
+    languages: [python]
+    severity: ERROR
+    message: "TLS verification disabled (`requests` with `verify=False`)."
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      category: security
+    pattern: requests.$M(..., verify=False, ...)
+
+  - id: disabled-cert-verification-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "TLS verification disabled."
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      category: security
+    pattern-either:
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+      - pattern: 'rejectUnauthorized: false'

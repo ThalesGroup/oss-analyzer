@@ -1,0 +1,20 @@
+{
+  "_comment": "Expected license_gate.py verdict of each component of sbom-fixture.cdx.json under data/test/policy-fixture.yml (the fixture's own license lists), checked by check_license_fixture.py (oss-analyzer's test:license-gate job). Deterministic: the SBOM is synthetic, no registry involved.",
+  "verdicts": {
+    "permissive-lib": "allow",
+    "dual-license-lib": "allow",
+    "openjdk-style-lib": "review",
+    "weak-copyleft-lib": "review",
+    "mpl-lib": "review",
+    "strong-copyleft-lib": "review",
+    "network-copyleft-lib": "review",
+    "source-available-lib": "review",
+    "noncommercial-lib": "deny",
+    "unlicensed-lib": "review",
+    "old-notation-lib": "review",
+    "composite-expression-lib": "review",
+    "name-with-or-lib": "allow",
+    "unlisted-name-with-and-lib": "review",
+    "commons-clause-lib": "review"
+  }
+}

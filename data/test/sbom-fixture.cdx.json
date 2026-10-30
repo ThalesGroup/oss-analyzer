@@ -1,0 +1,135 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "licenses-fixture"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "permissive-lib",
+      "version": "1.0.0",
+      "purl": "pkg:generic/permissive-lib@1.0.0",
+      "licenses": [{ "license": { "id": "MIT" } }]
+    },
+    {
+      "type": "library",
+      "name": "dual-license-lib",
+      "version": "2.3.0",
+      "purl": "pkg:cargo/dual-license-lib@2.3.0",
+      "licenses": [
+        { "license": { "id": "MIT" } },
+        { "license": { "id": "Apache-2.0" } }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "openjdk-style-lib",
+      "version": "17.0.0",
+      "purl": "pkg:maven/org.example/openjdk-style-lib@17.0.0",
+      "licenses": [
+        { "license": { "name": "GPL-2.0-only WITH Classpath-exception-2.0" } }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "weak-copyleft-lib",
+      "version": "0.9.1",
+      "purl": "pkg:npm/weak-copyleft-lib@0.9.1",
+      "licenses": [{ "license": { "id": "LGPL-2.1-only" } }]
+    },
+    {
+      "type": "library",
+      "name": "mpl-lib",
+      "version": "4.1.0",
+      "purl": "pkg:pypi/mpl-lib@4.1.0",
+      "licenses": [{ "license": { "id": "MPL-2.0" } }]
+    },
+    {
+      "type": "library",
+      "name": "strong-copyleft-lib",
+      "version": "3.0.0",
+      "purl": "pkg:golang/example.com/strong-copyleft-lib@3.0.0",
+      "licenses": [{ "license": { "id": "GPL-3.0-only" } }]
+    },
+    {
+      "type": "library",
+      "name": "network-copyleft-lib",
+      "version": "1.4.2",
+      "purl": "pkg:pypi/network-copyleft-lib@1.4.2",
+      "licenses": [{ "license": { "id": "AGPL-3.0-only" } }]
+    },
+    {
+      "type": "library",
+      "name": "source-available-lib",
+      "version": "5.0.0",
+      "purl": "pkg:npm/source-available-lib@5.0.0",
+      "licenses": [{ "license": { "id": "SSPL-1.0" } }]
+    },
+    {
+      "type": "library",
+      "name": "noncommercial-lib",
+      "version": "1.1.0",
+      "purl": "pkg:generic/noncommercial-lib@1.1.0",
+      "licenses": [{ "license": { "id": "CC-BY-NC-4.0" } }]
+    },
+    {
+      "type": "library",
+      "name": "unlicensed-lib",
+      "version": "0.0.1",
+      "purl": "pkg:npm/unlicensed-lib@0.0.1"
+    },
+    {
+      "type": "library",
+      "name": "old-notation-lib",
+      "version": "1.2.0",
+      "purl": "pkg:generic/old-notation-lib@1.2.0",
+      "licenses": [{ "license": { "name": "GPL-2.0+" } }]
+    },
+    {
+      "type": "library",
+      "name": "composite-expression-lib",
+      "version": "2.0.0",
+      "purl": "pkg:cargo/composite-expression-lib@2.0.0",
+      "licenses": [
+        { "license": { "name": "(MIT OR GPL-3.0-only) AND MPL-2.0" } }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "name-with-or-lib",
+      "version": "1.3.0",
+      "purl": "pkg:pypi/name-with-or-lib@1.3.0",
+      "licenses": [
+        { "license": { "name": "MATPLOTLIB License 1.3.0 or Later" } }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "unlisted-name-with-and-lib",
+      "version": "0.9.0",
+      "purl": "pkg:npm/unlisted-name-with-and-lib@0.9.0",
+      "licenses": [
+        { "license": { "name": "Foo and Bar Community License" } }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "commons-clause-lib",
+      "version": "4.0.0",
+      "purl": "pkg:maven/org.example/commons-clause-lib@4.0.0",
+      "licenses": [
+        { "expression": "Apache-2.0 WITH Commons-Clause" }
+      ]
+    },
+    {
+      "type": "operating-system",
+      "name": "debian",
+      "version": "12"
+    }
+  ]
+}

@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# oss-analyzer's own pipeline: builds the oss-analyzer image, then runs the
+# `analyze` component of this very commit on this repository (self-test).
+# A consuming project only needs the `include` block, with a released
+# version instead of $CI_COMMIT_SHA, e.g.:
+#
+#   include:
+#     - component: $CI_SERVER_FQDN/thalesgroup/oss-analyzer/analyze@0.4
+
+include:
+  - component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/analyze@$CI_COMMIT_SHA
+    inputs:
+      # The component's jobs run this commit's image: wait until it's pushed.
+      OSA_JOB_NEEDS: ["image:build"]
+
+stages:
+  - build
+  - test
+  - release
+
+# ---------------------------------------------------------------------------
+# oss-analyzer image (Dockerfile at the root): the scripts the CI/CD
+# component's report jobs run. Pushed to this project's registry, tagged
+# with the full commit SHA on every pipeline — a commit referenced by a
+# component include (@<sha>, or a release tag pointing at it) then always
+# has its image — plus the release tag itself on tag pipelines.
+#
+# Built with kaniko: no Docker daemon nor privileged pod needed, which the
+# Kubernetes runners don't offer. BuildKit rootless doesn't work there either
+# (rootlesskit: "failed to share mount point: /: permission denied").
+# The -debug variant ships the busybox shell the job needs.
+# ---------------------------------------------------------------------------
+image:build:
+  stage: build
+  interruptible: true
+  image:
+    name: gcr.io/kaniko-project/executor:v1.24.0-debug
+    entrypoint: [""]
+  # Same pipelines as the component's default OSA_JOB_RULES, which needs this job.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG
+  script:
+    # Registry credentials: this project's registry (push) on top of
+    # DOCKER_AUTH_CONFIG's own entries, if any (pull of the base image).
+    - |
+      REGISTRY_AUTH=$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')
+      if [ -n "$DOCKER_AUTH_CONFIG" ]; then
+        printf '%s' "$DOCKER_AUTH_CONFIG" \
+          | sed -E "s/\"auths\"[[:space:]]*:[[:space:]]*\{/\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$REGISTRY_AUTH\"},/" \
+          > /kaniko/.docker/config.json
+        # The sed above assumes a `"auths": {` object in DOCKER_AUTH_CONFIG;
+        # without it nothing is injected and the push would only fail with a
+        # 401 at the very end of the build.
+        grep -q "\"$CI_REGISTRY\"" /kaniko/.docker/config.json || {
+          echo "DOCKER_AUTH_CONFIG has no \"auths\" object: cannot add the credentials of $CI_REGISTRY" >&2
+          exit 1
+        }
+      else
+        printf '{"auths":{"%s":{"auth":"%s"}}}' "$CI_REGISTRY" "$REGISTRY_AUTH" > /kaniko/.docker/config.json
+      fi
+    - |
+      DESTINATIONS="--destination $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+      [ -n "$CI_COMMIT_TAG" ] && DESTINATIONS="$DESTINATIONS --destination $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+      /kaniko/executor \
+        --context "$CI_PROJECT_DIR" \
+        --dockerfile "$CI_PROJECT_DIR/Dockerfile" \
+        $DESTINATIONS
+
+# ---------------------------------------------------------------------------
+# License gate on a deterministic, synthetic SBOM (data/test/): every
+# component's verdict must match data/test/sbom-fixture.expected.json under
+# the fixture's own policy (data/test/policy-fixture.yml, independent of the
+# organization's lists), in enforce mode (the gate fails: the fixture holds
+# a denied license, CC-BY-NC-4.0) and in audit mode (it passes, reporting
+# would_fail). Runs this commit's image, i.e. the scripts the
+# component ships.
+# ---------------------------------------------------------------------------
+test:license-gate:
+  stage: test
+  interruptible: true
+  image: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  needs: ["image:build"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      run_gate() {  # <output dir>
+        python "$OSA_HOME/scripts/license_gate.py" \
+          --sbom data/test/sbom-fixture.cdx.json \
+          --policy data/test/policy-fixture.yml \
+          --output-dir "$1" > /dev/null
+      }
+      if run_gate /tmp/enforce; then echo "enforce: the gate should have failed" >&2; exit 1; fi
+      OSA_MODE=audit run_gate /tmp/audit
+    - |
+      python data/test/check_license_fixture.py \
+        /tmp/enforce/licenses.json /tmp/audit/licenses.json \
+        data/test/sbom-fixture.expected.json
+
+# ---------------------------------------------------------------------------
+# Unit tests (security/tests/): the component template itself (job graph,
+# artifacts each job reads from its needs, SBOM rules, --expect list),
+# settings resolution (prepare_settings.py, against the real defaults),
+# policy loading, merge and resolution, license gate evaluation,
+# aggregation, GitLab native report formats and their validation against
+# GitLab's official schemas, license lists, license catalog. Run in
+# this commit's image for its Python dependencies (jsonschema included),
+# against the checked-out scripts.
+# ---------------------------------------------------------------------------
+test:unit:
+  stage: test
+  interruptible: true
+  image: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  needs: ["image:build"]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_TAG
+  script:
+    - python -m unittest discover -s security/tests -v
+
+
+# ---------------------------------------------------------------------------
+# Release: publishes a new version of the `analyze` component in the CI/CD
+# Catalog, on a semantic-versioning tag (0.1.0, 1.2.3 — no "v" prefix: the
+# catalog requires plain semver). Only once every test of this tag's
+# pipeline passed: the self-test (the gate passes on this clean
+# repository), the deterministic license test and the unit tests — each
+# one listed in `needs`, since a job not listed there doesn't hold the
+# release back.
+# image:build has pushed the image the component runs, tagged with this
+# commit's SHA (and with the version).
+# ---------------------------------------------------------------------------
+release:
+  stage: release
+  image: docker.io/gitlab/glab:v1.120.0
+  needs:
+    - image:build
+    - osa_report_aggregate
+    - test:license-gate
+    - test:unit
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/
+  script:
+    - echo "Releasing the oss-analyzer component $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "oss-analyzer $CI_COMMIT_TAG"
+    description: >-
+      oss-analyzer CI/CD component $CI_COMMIT_TAG.
+      Include it with
+      `- component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/analyze@$CI_COMMIT_TAG`.
+      Report scripts image: `$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG`.
+
+# ---------------------------------------------------------------------------
+# Scheduled full analysis: detects CVEs published since the last build,
+# and triggers the heavy jobs (osa_licenses_deep).
+# Create under CI/CD > Schedules, cron: 0 3 * * 1  (Monday 3am)
+# ---------------------------------------------------------------------------

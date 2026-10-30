@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# Shell scripts and the Python scripts they drive run under Linux (WSL, CI
+# containers). A CRLF working-tree copy breaks them at the first line:
+# bash reads the \r as part of the command ("$'\r': command not found").
+# Force LF regardless of each contributor's core.autocrlf setting.
+*.sh text eol=lf
+security/scripts/*.py text eol=lf

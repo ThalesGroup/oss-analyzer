@@ -1,0 +1,982 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+spec:
+  # 256 characters max.
+  description: >-
+    Open Source security and compliance gate: SBOM, dependency CVEs, SAST,
+    secrets, containers/IaC, licenses as code. One blocking gate with dated
+    exceptions, HTML dashboard, GitLab MR reports. No SaaS, no server.
+  component: [name, version, sha, reference]
+  inputs:
+    # --- Common ---------------------------------------------------------------
+    OSA_STAGE:
+      default: test
+      description: Stage of every job of the component (ordering goes through `needs`). `test` exists in GitLab's default stages.
+    OSA_JOB_RULES:
+      default: mr_main_schedule_tag
+      options: [mr_main_schedule_tag, always, manual, never]
+      description: >-
+        When the analysis runs. mr_main_schedule_tag: merge request pipelines,
+        default branch, schedules and tags. always: every pipeline. manual:
+        same pipelines as `always`, started by playing the osa_prepare job.
+        never: no job at all.
+    OSA_JOB_NEEDS:
+      type: array
+      default: []
+      description: Jobs to wait for (e.g. a build) before the analysis starts. Empty starts it at the beginning of the pipeline.
+    OSA_JOB_SUFFIX:
+      default: ""
+      description: Appended to every job name (and `needs`), to include the component several times.
+    OSA_JOB_TAGS:
+      type: array
+      default: []
+      description: Runner tags of every job.
+
+    # --- Target and paths -----------------------------------------------------
+    OSA_REPORT_DIR:
+      default: security-reports
+      description: Folder of every report. Interpolated when the YAML is read, so expose_as sees a literal path.
+    OSA_SETTINGS_DIR:
+      default: security
+      description: >-
+        The project's settings folder: policy-global.yml, policy-licenses.yml, policy-semgrep.yml,
+        policy-gitleaks.toml, each optional. Each one present completes the organization default
+        embedded in the oss-analyzer image instead of replacing it (see the README, "Customizing
+        oss-analyzer"). Absent folder or file means the default applies as-is.
+    OSA_CONTAINER_IMAGE:
+      default: ""
+      description: Image of the project to scan with Trivy (vulnerabilities and secrets). Empty scans only Dockerfiles/IaC.
+
+    # --- Policy and gate ------------------------------------------------------
+    OSA_DISTRIBUTION_MODEL:
+      default: ""
+      options: ["", saas, distributed, oss_library]
+      description: Distribution model, shown in the reports. It selects the policy's `licenses.by_distribution_model` rules, if any (the organization base has none). Empty keeps the policy's own `meta.distribution_model`.
+    OSA_MODE:
+      default: enforce
+      options: [enforce, audit]
+      description: Default mode of the policy's categories. enforce makes the gate block on policy violations; audit reports them without blocking (onboarding). A category's own `mode` in the policy wins over this input.
+    OSA_GATE_SCOPE:
+      default: all
+      options: [all, new]
+      description: >-
+        What the gate blocks. all: every policy violation. new (onboarding of a project with a
+        backlog): on a merge request, only what isn't in the target branch's latest successful
+        report (full gate when there is none); elsewhere, reported without blocking, so it needs
+        merge request pipelines. Coverage gaps always block.
+
+    # --- Steps ----------------------------------------------------------------
+    OSA_ENABLE_SCA_OSV:
+      type: boolean
+      default: true
+      description: OSV-Scanner, second opinion on dependency vulnerabilities.
+    OSA_ENABLE_SAST_SEMGREP:
+      type: boolean
+      default: true
+      description: Semgrep SAST on the project's code.
+    OSA_ENABLE_SECRETS_GITLEAKS:
+      type: boolean
+      default: true
+      description: Gitleaks on the git history.
+    OSA_ENABLE_CONTAINERS_TRIVY:
+      type: boolean
+      default: true
+      description: Trivy on Dockerfiles/IaC (and on OSA_CONTAINER_IMAGE). Only when a Dockerfile exists.
+    OSA_ENABLE_LICENSES_REUSE:
+      type: boolean
+      default: true
+      description: REUSE check of the project's own SPDX headers. Always reporting-only.
+    OSA_ENABLE_SBOM_CDXGEN:
+      type: boolean
+      default: true
+      description: cdxgen resolution of the real Maven/Gradle dependency graph. Only when a pom.xml or build.gradle exists.
+    OSA_MAVEN_MIRROR_URL:
+      default: ""
+      description: >-
+        Maven repository cdxgen resolves through instead of Maven Central
+        (a mirror of `central`, e.g. https://repo.example.com/maven2).
+        Empty uses Maven Central. Credentials, if needed: a masked
+        OSA_MAVEN_MIRROR_AUTH CI/CD variable (base64 of user:secret). Maven
+        only, not Gradle.
+    OSA_LICENSES_DEEP:
+      default: schedule_or_manual
+      options: [schedule_or_manual, always, never]
+      description: Trivy file-by-file license scan (slow). schedule_or_manual runs it on schedules, and as a manual job otherwise.
+    OSA_ENABLE_GITLAB_REPORTS:
+      type: boolean
+      default: true
+      description: GitLab native MR reports (Security scan, Code Quality).
+    OSA_ENABLE_DASHBOARD:
+      type: boolean
+      default: true
+      description: HTML dashboard, linked from the MR pipeline widget.
+    OSA_ENABLE_PAGES:
+      type: boolean
+      default: false
+      description: On the default branch, a `public/` artifact holding the dashboard, for the project's own `pages` job to publish.
+    OSA_ENABLE_MR_COMMENT:
+      type: boolean
+      default: false
+      description: Summary comment on the merge request (verdict, blocking findings, dashboard link), updated by each pipeline. Needs a masked OSA_GITLAB_TOKEN CI/CD variable (project access token, scope api, role Reporter).
+    OSA_ENABLE_DTRACK:
+      type: boolean
+      default: false
+      description: Upload of the SBOM to Dependency-Track (default branch and tags). Needs OSA_DTRACK_URL and a masked DTRACK_API_KEY CI/CD variable.
+    OSA_DTRACK_URL:
+      default: ""
+      description: Dependency-Track base URL.
+
+    # --- Images ---------------------------------------------------------------
+    OSA_IMAGE_REPOSITORY:
+      default: $CI_REGISTRY/thalesgroup/oss-analyzer
+      description: Repository of the oss-analyzer image (report scripts). Its tag is always the component's commit SHA, so the scripts match the component version.
+    OSA_SYFT_IMAGE:
+      # -debug: the distroless tag has no shell, which a GitLab job needs.
+      default: docker.io/anchore/syft:v1.52.0-debug
+    OSA_GRYPE_IMAGE:
+      # -debug: same reason as Syft.
+      default: docker.io/anchore/grype:v0.119.0-debug
+    OSA_OSV_IMAGE:
+      default: ghcr.io/google/osv-scanner:v2.6.0
+    OSA_SEMGREP_IMAGE:
+      default: docker.io/semgrep/semgrep:1.177.0
+    OSA_GITLEAKS_IMAGE:
+      # Same image (same digest) as ghcr.io/gitleaks/gitleaks.
+      default: docker.io/zricethezav/gitleaks:v8.30.1
+    OSA_TRIVY_IMAGE:
+      default: docker.io/aquasec/trivy:0.74.0
+    OSA_REUSE_IMAGE:
+      default: docker.io/fsfe/reuse:6.2.0
+    OSA_CDXGEN_IMAGE:
+      # OWASP cdxgen with a JDK + Maven/Gradle bundled.
+      default: ghcr.io/cyclonedx/cdxgen:13.3.0
+    OSA_CYCLONEDX_CLI_IMAGE:
+      default: docker.io/cyclonedx/cyclonedx-cli:0.33.1
+    OSA_CURL_IMAGE:
+      default: docker.io/curlimages/curl:8.22.0
+---
+# =============================================================================
+# oss-analyzer `analyze` component
+#
+# Every job runs in a single stage (OSA_STAGE); ordering is the `needs` graph:
+#
+#   osa_prepare ─┬─ osa_sbom_generate ─┬──────────────────────┬─ osa_sca_grype ──────┐
+#                ├─ osa_sbom_cdxgen* ──┴─ osa_sbom_merge* ────┼─ osa_licenses_gate ──┤
+#                │                                            └─ osa_dtrack_upload   │
+#                ├─ osa_sca_osv, osa_sast_semgrep, osa_secrets_gitleaks,             │
+#                │  osa_containers_trivy, osa_licenses_reuse ────────────────────────┤
+#                │                                                                   │
+#                ├─ osa_licenses_deep (standalone: report read by hand, not used by the gate)
+#                │
+#                └──────────────────────────────────────────── osa_report_aggregate ─┴─ osa_report_dashboard ─ osa_pages
+#                                                                                    └─ osa_report_gitlab_native
+#   * Maven/Gradle projects only (see "SBOM" below).
+#
+# Scanners and the license gate never block (allow_failure): the verdict is
+# osa_report_aggregate's, after applying the policy and its exceptions — a
+# scanner that left no report blocks there (enforce mode), as a coverage
+# gap. Only a failure of the plumbing (osa_prepare, osa_sbom_generate,
+# osa_sbom_merge) stops the pipeline before it; osa_sbom_cdxgen is
+# best-effort too (see that job).
+#
+# Artifacts: each job publishes only the files it writes, under
+# OSA_REPORT_DIR — sbom.* (SBOM jobs), <scanner>.json (scanners),
+# licenses.json/.md (gate), security-report.json/.md (aggregate),
+# dashboard.html, the GitLab report files, public/ (osa_pages). A job of
+# yours reading one of them needs the job that writes it.
+# =============================================================================
+
+# --- Shared definitions ------------------------------------------------------
+.osa_definitions:
+  rules:
+    # The one "don't run" condition, reused by every job through the
+    # *osa_skip alias as its first rule (`when: never`). Each job then adds
+    # its own restrictions (step disabled, default branch only, ...) and
+    # ends with how it runs (on_success, always, manual, exists).
+    - if: &osa_skip >-
+        "$[[ inputs.OSA_JOB_RULES ]]" == "never" ||
+        ("$[[ inputs.OSA_JOB_RULES ]]" == "mr_main_schedule_tag" &&
+        $CI_PIPELINE_SOURCE != "merge_request_event" &&
+        $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH &&
+        $CI_PIPELINE_SOURCE != "schedule" &&
+        $CI_COMMIT_TAG == null)
+      when: never
+
+.osa_job:
+  stage: $[[ inputs.OSA_STAGE ]]
+  tags: $[[ inputs.OSA_JOB_TAGS ]]
+  # A newer pipeline on the same ref may cancel these jobs (with the
+  # project's "Auto-cancel redundant pipelines"): analyzing an outdated
+  # commit is wasted runner time.
+  interruptible: true
+  # Infrastructure failures only (runner lost, job never picked up, a clone
+  # or API call timing out on the runner side): since the gate expects each
+  # scanner's report, one of those would otherwise block the pipeline until
+  # someone retries it. A script failure is never retried — and a job past
+  # its own `timeout` fails as job_execution_timeout, not retried either.
+  retry:
+    max: 2
+    when: [runner_system_failure, stuck_or_timeout_failure, scheduler_failure, api_failure]
+  variables:
+    OSA_REPORT_DIR: $[[ inputs.OSA_REPORT_DIR ]]
+    OSA_SBOM: $[[ inputs.OSA_REPORT_DIR ]]/sbom.cdx.json
+    # Effective settings, resolved by osa_prepare (prepare_settings.py): the
+    # image's defaults completed by the project's OSA_SETTINGS_DIR files.
+    OSA_CONFIG_DIR: $[[ inputs.OSA_REPORT_DIR ]]/.osa
+    OSA_MODE: $[[ inputs.OSA_MODE ]]
+    OSA_DISTRIBUTION_MODEL: $[[ inputs.OSA_DISTRIBUTION_MODEL ]]
+    SEMGREP_SEND_METRICS: "off"
+    ANCHORE_DISABLE_UPDATE_CHECK: "true"
+
+# Scanners: never block, the gate decides.
+# Every job publishes only the files it writes (each scanner lists its
+# `artifacts: paths`): a job downstream gets each file from the job that
+# produced it, through its `needs` — never a stale copy re-published along
+# the way, which could hide a missing report from the coverage check.
+.osa_scan:
+  extends: .osa_job
+  allow_failure: true
+  artifacts:
+    when: always
+    expire_in: 30 days
+
+# Jobs running the oss-analyzer image's scripts.
+.osa_python:
+  extends: .osa_job
+  image: $[[ inputs.OSA_IMAGE_REPOSITORY ]]:$[[ component.sha ]]
+
+# =============================================================================
+# PREPARE — entry point of the graph
+#
+# Waits for OSA_JOB_NEEDS, carries the `manual` mode (a single job to play
+# instead of one per scanner), prints the component version, and resolves
+# the settings every later job reads from $OSA_CONFIG_DIR
+# (prepare_settings.py): the organization defaults embedded in the image,
+# completed by the project's OSA_SETTINGS_DIR files — the policy merged on
+# top of the base (distribution model and modes resolved), the project's
+# Semgrep rules added to oss-analyzer's, its Gitleaks config extending
+# oss-analyzer's. The job log prints where each facet comes from.
+# Resolved here, once, because the Gitleaks and Semgrep jobs run in their
+# own images, which don't carry those defaults.
+# =============================================================================
+osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_python
+  needs: $[[ inputs.OSA_JOB_NEEDS ]]
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_JOB_RULES ]]" == "manual"'
+      when: manual
+      # false: the jobs needing this one wait for it to be played, instead of
+      # being skipped.
+      allow_failure: false
+    - when: on_success
+  script:
+    - echo "oss-analyzer $[[ component.name ]] $[[ component.version ]] (ref $[[ component.reference ]], sha $[[ component.sha ]])"
+    # Run from the project's root: the Gitleaks [extend] path it writes is
+    # relative to the working directory, the Gitleaks job's too.
+    - |
+      python $OSA_HOME/scripts/prepare_settings.py \
+        --defaults "$OSA_HOME/defaults" \
+        --settings-dir "$[[ inputs.OSA_SETTINGS_DIR ]]" \
+        ${OSA_DISTRIBUTION_MODEL:+--distribution-model "$OSA_DISTRIBUTION_MODEL"} \
+        --mode "$OSA_MODE" \
+        --output-dir "$OSA_CONFIG_DIR"
+    # Later jobs run under other users (Grype's image is nonroot, uid 65532).
+    - chmod -R a+rwX "$OSA_REPORT_DIR"
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/.osa/
+
+# =============================================================================
+# SBOM — single inventory feeding the dependency checks
+#
+# Syft alone only reads manifests as text: it never resolves a real
+# Maven/Gradle dependency graph, so it misses every transitive dependency
+# pulled in through a parent/BOM import (measured on a Spring-Boot-shaped
+# project: 0 Grype findings from Syft's SBOM, 94 with 8 Critical from a
+# cdxgen SBOM with a real `mvn` resolution). Syft therefore always runs, and
+# the single sbom.cdx.json read downstream comes from:
+#   - osa_sbom_generate itself, on a project with no Maven/Gradle manifest
+#     (or with OSA_ENABLE_SBOM_CDXGEN off): Syft's SBOM, nothing to merge;
+#   - otherwise osa_sbom_merge, which runs only then, after osa_sbom_cdxgen:
+#     both SBOMs combined, or Syft's alone when cdxgen fails or times out,
+#     so that the analysis always completes (its log says which).
+# Jobs reading the SBOM need both, osa_sbom_merge `optional`. The Maven/
+# Gradle test of osa_sbom_generate and the `exists` rule of the other two
+# must stay the same, or one case would end up with no sbom.cdx.json.
+# =============================================================================
+osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_job
+  image:
+    name: $[[ inputs.OSA_SYFT_IMAGE ]]
+    entrypoint: [""]
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - when: on_success
+  script:
+    - mkdir -p "$OSA_REPORT_DIR"
+    # The -debug image ships the binary as /syft, outside the PATH. Appending
+    # / (rather than calling /syft) keeps an override with syft on the PATH
+    # working too.
+    - export PATH="$PATH:/"
+    - |
+      syft scan dir:. \
+        --exclude './node_modules/**' \
+        --exclude './target/debug/**' \
+        --exclude './.git/**' \
+        --exclude "./$OSA_REPORT_DIR/**" \
+        -o cyclonedx-json=$OSA_REPORT_DIR/sbom.syft.cdx.json \
+        -o spdx-json=$OSA_REPORT_DIR/sbom.spdx.json \
+        -o table
+    - |
+      # Same test as the `exists` rule of osa_sbom_cdxgen / osa_sbom_merge
+      # (the checkout holds the repository's files only). Plain `find -name`
+      # for busybox's find; $(...) rather than a pipe into `grep -q`: with
+      # pipefail, find killed by SIGPIPE would read as false.
+      MANIFEST=$(find . \( -name pom.xml -o -name build.gradle -o -name build.gradle.kts \) -print 2>/dev/null | head -n 1) || true
+      if [ "$[[ inputs.OSA_ENABLE_SBOM_CDXGEN ]]" = "true" ] && [ -n "$MANIFEST" ]; then
+        echo "Maven/Gradle project ($MANIFEST): osa_sbom_merge combines this SBOM with cdxgen's."
+      else
+        cp "$OSA_REPORT_DIR/sbom.syft.cdx.json" "$OSA_SBOM"
+        echo "SBOM: Syft's (no Maven/Gradle project, or cdxgen disabled: nothing to merge)."
+      fi
+    - chmod -R a+rwX "$OSA_REPORT_DIR"
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/sbom.syft.cdx.json
+      - $[[ inputs.OSA_REPORT_DIR ]]/sbom.spdx.json
+      - $[[ inputs.OSA_REPORT_DIR ]]/sbom.cdx.json
+    reports:
+      # License compliance / dependency list (Ultimate). Absent on a
+      # Maven/Gradle project, where osa_sbom_merge reports it.
+      cyclonedx: $[[ inputs.OSA_REPORT_DIR ]]/sbom.cdx.json
+
+# cdxgen drives the project's own build tool (mvn/gradle) to resolve the
+# real dependency tree. Needs network access to the Maven/Gradle repository
+# the project builds against. Build-time plugins can read the job's
+# environment: scope down any credential not needed here.
+# Best-effort, and bounded: a repository that throttles (Maven Central
+# answering 429 Too Many Requests) makes the resolver wait silently for
+# minutes. Past CDXGEN_TIME_LIMIT, or on any failure, no cdxgen SBOM is
+# kept and osa_sbom_merge goes on with Syft's alone (static manifests:
+# transitive dependencies missed); allow_failure and the job timeout cover
+# what the script can't (no `timeout` binary, a hung pod).
+# OSA_MAVEN_MIRROR_URL avoids Central's throttling: a settings.xml written
+# outside the checkout mirrors `central` there (repositories the project
+# declares itself are still used directly), passed to cdxgen's Maven runs
+# through MVN_ARGS. Its credentials stay ${env.*} references: the decoded
+# OSA_MAVEN_MIRROR_AUTH is only in the job's environment, unmasked there
+# (GitLab masks the base64 form), like every credential this job sees.
+osa_sbom_cdxgen$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_job
+  image: $[[ inputs.OSA_CDXGEN_IMAGE ]]
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_SBOM_CDXGEN ]]" != "true"'
+      when: never
+    - exists: ["**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+  allow_failure: true
+  timeout: 15m
+  variables:
+    CDXGEN_TIME_LIMIT: "600"  # seconds, below the job timeout to keep the log
+    OSA_MAVEN_MIRROR_URL: $[[ inputs.OSA_MAVEN_MIRROR_URL ]]
+  script:
+    - mkdir -p "$OSA_REPORT_DIR"
+    - |
+      if [ -n "$OSA_MAVEN_MIRROR_URL" ]; then
+        SETTINGS="${TMPDIR:-/tmp}/osa-maven-settings.xml"
+        SERVER=""
+        if [ -n "${OSA_MAVEN_MIRROR_AUTH:-}" ] && ! command -v base64 >/dev/null 2>&1; then
+          echo "WARNING: no base64 in the cdxgen image to decode OSA_MAVEN_MIRROR_AUTH: mirror used without credentials."
+        elif [ -n "${OSA_MAVEN_MIRROR_AUTH:-}" ]; then
+          CREDS=$(printf '%s' "$OSA_MAVEN_MIRROR_AUTH" | base64 -d 2>/dev/null) || CREDS=""
+          case "$CREDS" in
+            *:*)
+              export OSA_MAVEN_MIRROR_USER="${CREDS%%:*}" OSA_MAVEN_MIRROR_PASSWORD="${CREDS#*:}"
+              SERVER='<servers><server><id>osa-maven-mirror</id><username>${env.OSA_MAVEN_MIRROR_USER}</username><password>${env.OSA_MAVEN_MIRROR_PASSWORD}</password></server></servers>' ;;
+            *) echo "WARNING: OSA_MAVEN_MIRROR_AUTH isn't base64 of user:secret: mirror used without credentials." ;;
+          esac
+          unset CREDS
+        fi
+        printf '%s\n' '<settings>' "$SERVER" \
+          "<mirrors><mirror><id>osa-maven-mirror</id><mirrorOf>central</mirrorOf><url>$OSA_MAVEN_MIRROR_URL</url></mirror></mirrors>" \
+          '</settings>' > "$SETTINGS"
+        export MVN_ARGS="${MVN_ARGS:+$MVN_ARGS }-s $SETTINGS"
+        echo "Maven: central mirrored by $OSA_MAVEN_MIRROR_URL ($([ -n "$SERVER" ] && echo "with" || echo "without") credentials)."
+      fi
+      OUT="$OSA_REPORT_DIR/sbom.cdxgen.cdx.json"
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "$CDXGEN_TIME_LIMIT" cdxgen -t java -o "$OUT" . || rc=$?
+      else
+        cdxgen -t java -o "$OUT" . || rc=$?
+      fi
+      # A run cut short (124 = past CDXGEN_TIME_LIMIT) can leave a truncated
+      # file: dropped. Any other SBOM is kept, and osa_sbom_merge validates
+      # it (`cyclonedx merge` fails on a broken one, the merge then falls
+      # back to Syft's). No JSON check here: the image ships cdxgen as a
+      # standalone binary, without node or python — a check relying on one
+      # would fail and drop every valid SBOM.
+      if [ "${rc:-0}" -eq 124 ]; then
+        rm -f "$OUT"
+      fi
+      if [ ! -f "$OUT" ]; then
+        echo "WARNING: cdxgen produced no SBOM (exit ${rc:-0}, 124 = past ${CDXGEN_TIME_LIMIT}s): the analysis goes on with Syft's SBOM alone, without the resolved Maven/Gradle dependency graph."
+      fi
+    - chmod -R a+rwX "$OSA_REPORT_DIR"
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/sbom.cdxgen.cdx.json
+
+# Only where osa_sbom_cdxgen runs (same rules): elsewhere osa_sbom_generate
+# writes sbom.cdx.json itself.
+osa_sbom_merge$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_job
+  image: $[[ inputs.OSA_CYCLONEDX_CLI_IMAGE ]]
+  needs:
+    - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
+    - job: osa_sbom_cdxgen$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_SBOM_CDXGEN ]]" != "true"'
+      when: never
+    - exists: ["**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+  script:
+    - |
+      # Syft's SBOM alone when cdxgen failed or timed out (no SBOM left), or
+      # its SBOM can't be merged: the analysis never stops here.
+      if [ -f "$OSA_REPORT_DIR/sbom.cdxgen.cdx.json" ] && cyclonedx merge \
+          --input-files $OSA_REPORT_DIR/sbom.syft.cdx.json $OSA_REPORT_DIR/sbom.cdxgen.cdx.json \
+          --output-file $OSA_SBOM \
+          --output-format json; then
+        echo "SBOM: Syft + cdxgen (resolved Maven/Gradle dependency graph)."
+      else
+        cp $OSA_REPORT_DIR/sbom.syft.cdx.json $OSA_SBOM
+        echo "SBOM: Syft alone (no cdxgen SBOM, or it couldn't be merged - see osa_sbom_cdxgen and this log)."
+      fi
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/sbom.cdx.json
+    reports:
+      # License compliance / dependency list (Ultimate).
+      cyclonedx: $[[ inputs.OSA_REPORT_DIR ]]/sbom.cdx.json
+
+# =============================================================================
+# SCANS
+# =============================================================================
+
+# --- SCA: Grype on the SBOM (deduplicated with OSV by the gate) --------------
+osa_sca_grype$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image:
+    name: $[[ inputs.OSA_GRYPE_IMAGE ]]
+    entrypoint: [""]
+  needs:
+    - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
+    - job: osa_sbom_merge$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+  rules:
+    - if: *osa_skip
+      when: never
+    - when: on_success
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/grype.json
+  # Grype's vulnerability database (~100+ MB) took most of this job's time
+  # when downloaded on every run. Cached instead: Grype still checks for a
+  # newer database on start (published daily) and only downloads then.
+  variables:
+    GRYPE_DB_CACHE_DIR: $CI_PROJECT_DIR/.osa-cache/grype
+  cache:
+    key: osa-grype-db
+    paths:
+      - .osa-cache/grype/
+    when: always
+  script:
+    # The -debug image ships the binary at /grype, not on $PATH.
+    - /grype db status || true
+    - /grype sbom:$OSA_SBOM -o json --file $OSA_REPORT_DIR/grype.json
+    - /grype sbom:$OSA_SBOM -o table
+  after_script:
+    # This image runs as nonroot (uid 65532) while the runner restores the
+    # cache as another user: keep the database writable for the next run's
+    # update. File modes are kept in the cache archive.
+    - chmod -R a+rwX .osa-cache 2>/dev/null || true
+
+# --- SCA: OSV-Scanner, second opinion (OSV database, different coverage) -----
+osa_sca_osv$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image:
+    name: $[[ inputs.OSA_OSV_IMAGE ]]
+    entrypoint: [""]
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_SCA_OSV ]]" != "true"'
+      when: never
+    - when: on_success
+  script:
+    - mkdir -p "$OSA_REPORT_DIR"
+    - |
+      rc=0
+      /osv-scanner scan source --recursive \
+        --format json --output $OSA_REPORT_DIR/osv.json . || rc=$?
+      # Exit code 128 = "No package sources found": nothing for OSV to scan,
+      # which is not a coverage loss, but it writes no file. Leave an empty
+      # result so that the gate (--expect osv) doesn't read it as a missing
+      # report. Any other failure (crash, network) still leaves no report.
+      if [ "$rc" -eq 128 ]; then
+        echo "No package source recognized by OSV-Scanner: nothing to scan."
+        echo '{"results": []}' > $OSA_REPORT_DIR/osv.json
+      fi
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/osv.json
+
+# --- SAST: Semgrep -------------------------------------------------------------
+# Rules resolved by osa_prepare: the registry packs (sast.registry_packs),
+# oss-analyzer's rules and the project's (one --config per file, kept in
+# one folder so that reported rule IDs don't change). The explicit `.` scan
+# path sidesteps the semgrep image's Docker detection, which otherwise
+# expects the code on a mounted volume ("Detected Docker environment
+# without a code volume") — under the Kubernetes executor the code is
+# checked out directly in the container.
+osa_sast_semgrep$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image: $[[ inputs.OSA_SEMGREP_IMAGE ]]
+  needs: ["osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]"]
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_SAST_SEMGREP ]]" != "true"'
+      when: never
+    - when: on_success
+  script:
+    - |
+      CONFIGS=""
+      # `if`, not `[ ] &&`: a loop ending on a false test would fail the job.
+      while read -r pack; do
+        if [ -n "$pack" ]; then CONFIGS="$CONFIGS --config $pack"; fi
+      done < "$OSA_CONFIG_DIR/semgrep-packs.txt"
+      for f in "$OSA_CONFIG_DIR"/semgrep/*.yml; do
+        if [ -f "$f" ]; then CONFIGS="$CONFIGS --config $f"; fi
+      done
+      if [ -z "$CONFIGS" ]; then
+        # No pack nor rule configured: nothing to run, which isn't a missing report.
+        echo "No Semgrep rule configured (sast.registry_packs empty, no rules file)."
+        echo '{"results": [], "errors": []}' > $OSA_REPORT_DIR/semgrep.json
+        exit 0
+      fi
+      semgrep scan $CONFIGS \
+        --exclude "$OSA_REPORT_DIR" \
+        --metrics off \
+        --json-output $OSA_REPORT_DIR/semgrep.json \
+        --gitlab-sast-output $OSA_REPORT_DIR/gl-sast-report.json \
+        . || true
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/semgrep.json
+      - $[[ inputs.OSA_REPORT_DIR ]]/gl-sast-report.json
+    reports:
+      sast: $[[ inputs.OSA_REPORT_DIR ]]/gl-sast-report.json
+
+# --- Secrets: Gitleaks (git history) ------------------------------------------
+# GIT_DEPTH: 0 fetches the full history. Without --log-opts, `gitleaks
+# detect` walks every ref of the local clone (git log --all), and which refs
+# the runner fetches depends on the project's Git refspecs setting — a
+# secret on an unrelated branch could then fail this pipeline. The scan is
+# therefore scoped explicitly: the MR's own commit range on a merge request
+# pipeline, the whole history of HEAD elsewhere (default branch, schedule,
+# tag), which still catches a secret committed then removed.
+osa_secrets_gitleaks$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image:
+    name: $[[ inputs.OSA_GITLEAKS_IMAGE ]]
+    entrypoint: [""]
+  needs: ["osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]"]
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_SECRETS_GITLEAKS ]]" != "true"'
+      when: never
+    - when: on_success
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - |
+      if [ -n "$CI_MERGE_REQUEST_DIFF_BASE_SHA" ]; then
+        LOG_OPTS="--log-opts=$CI_MERGE_REQUEST_DIFF_BASE_SHA..$CI_COMMIT_SHA"
+      else
+        LOG_OPTS="--log-opts=HEAD"
+      fi
+      gitleaks detect \
+        --source . \
+        --config $OSA_CONFIG_DIR/policy-gitleaks.toml \
+        --report-format json \
+        --report-path $OSA_REPORT_DIR/gitleaks.json \
+        --redact \
+        --exit-code 0 \
+        --verbose \
+        $LOG_OPTS
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/gitleaks.json
+
+# --- Containers / IaC: Trivy (only if a Dockerfile exists) -------------------
+osa_containers_trivy$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image: $[[ inputs.OSA_TRIVY_IMAGE ]]
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_CONTAINERS_TRIVY ]]" != "true"'
+      when: never
+    - exists: [Dockerfile, "**/Dockerfile"]
+  script:
+    - mkdir -p "$OSA_REPORT_DIR"
+    - trivy config --skip-dirs "$OSA_REPORT_DIR" --format json --output $OSA_REPORT_DIR/trivy-iac.json . || true
+    - |
+      if [ -n "$[[ inputs.OSA_CONTAINER_IMAGE ]]" ]; then
+        trivy image --scanners vuln,secret \
+          --format json --output $OSA_REPORT_DIR/trivy-image.json "$[[ inputs.OSA_CONTAINER_IMAGE ]]"
+      fi
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/trivy-iac.json
+      - $[[ inputs.OSA_REPORT_DIR ]]/trivy-image.json
+
+# --- Licenses: Trivy file-by-file (slow) --------------------------------------
+# Detects license headers in shipped code, copy-pasted fragments and files
+# with no package metadata, beyond what the SBOM declares.
+osa_licenses_deep$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image: $[[ inputs.OSA_TRIVY_IMAGE ]]
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_LICENSES_DEEP ]]" == "never"'
+      when: never
+    - if: '"$[[ inputs.OSA_LICENSES_DEEP ]]" == "always" || $CI_PIPELINE_SOURCE == "schedule"'
+      when: on_success
+    # schedule_or_manual, outside a schedule
+    - when: manual
+  script:
+    - mkdir -p "$OSA_REPORT_DIR"
+    - |
+      trivy fs --scanners license --license-full --skip-dirs "$OSA_REPORT_DIR" \
+        --format json --output $OSA_REPORT_DIR/trivy-licenses.json .
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/trivy-licenses.json
+
+# --- Licenses: REUSE (the project's own SPDX headers) -------------------------
+# Distinct from osa_licenses_deep (third-party code): checks that the
+# project's own files carry SPDX-FileCopyrightText/SPDX-License-Identifier
+# headers (https://reuse.software/). Always reporting-only: a sensitization
+# signal, never blocking whatever the policy.
+osa_licenses_reuse$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_scan
+  image: $[[ inputs.OSA_REUSE_IMAGE ]]
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_LICENSES_REUSE ]]" != "true"'
+      when: never
+    - when: on_success
+  script:
+    - mkdir -p "$OSA_REPORT_DIR"
+    # Exit code 1 means "not compliant", not a tool failure.
+    - reuse lint --json > $OSA_REPORT_DIR/reuse.json || true
+  artifacts:
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/reuse.json
+
+# =============================================================================
+# GATE — applying the policy
+# =============================================================================
+osa_licenses_gate$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_python
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+    - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
+    - job: osa_sbom_merge$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+  rules:
+    - if: *osa_skip
+      when: never
+    - when: on_success
+  # Its verdict is picked up by osa_report_aggregate, the only blocking point.
+  allow_failure: true
+  script:
+    - |
+      python $OSA_HOME/scripts/license_gate.py \
+        --sbom $OSA_SBOM \
+        --policy $OSA_CONFIG_DIR/policy-global.yml \
+        --output-dir $OSA_REPORT_DIR
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/licenses.json
+      - $[[ inputs.OSA_REPORT_DIR ]]/licenses.md
+
+osa_report_aggregate$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_python
+  needs:
+    - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
+    # Ordering only (no file read from it): no verdict without an SBOM.
+    - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
+      artifacts: false
+    - job: osa_licenses_gate$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+    - job: osa_sca_grype$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+    - job: osa_sca_osv$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+    - job: osa_sast_semgrep$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+    - job: osa_secrets_gitleaks$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+    - job: osa_containers_trivy$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+    - job: osa_licenses_reuse$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+  rules:
+    - if: *osa_skip
+      when: never
+    - when: on_success
+  script:
+    - |
+      # Scanners that were supposed to run: a missing report from one of them
+      # must not read as "nothing found" (aggregate_report.py --expect).
+      EXPECT="grype,licenses"
+      if [ "$[[ inputs.OSA_ENABLE_SCA_OSV ]]" = "true" ]; then EXPECT="$EXPECT,osv"; fi
+      if [ "$[[ inputs.OSA_ENABLE_SAST_SEMGREP ]]" = "true" ]; then EXPECT="$EXPECT,semgrep"; fi
+      if [ "$[[ inputs.OSA_ENABLE_SECRETS_GITLEAKS ]]" = "true" ]; then EXPECT="$EXPECT,gitleaks"; fi
+      # Trivy runs only when a Dockerfile exists (its `exists` rule): same
+      # test here, its IaC report then expected. trivy-image.json isn't (it
+      # only exists with OSA_CONTAINER_IMAGE).
+      DOCKERFILE=$(find . -name Dockerfile -print 2>/dev/null | head -n 1) || true
+      if [ "$[[ inputs.OSA_ENABLE_CONTAINERS_TRIVY ]]" = "true" ] && [ -n "$DOCKERFILE" ]; then EXPECT="$EXPECT,trivy"; fi
+      # New-findings-only gate: on a merge request, the baseline is this same
+      # job's report on the target branch (latest successful pipeline).
+      SCOPE_ARGS="--gate-scope $[[ inputs.OSA_GATE_SCOPE ]]"
+      if [ "$[[ inputs.OSA_GATE_SCOPE ]]" = "new" ] && [ -n "$CI_MERGE_REQUEST_IID" ]; then
+        python $OSA_HOME/scripts/fetch_baseline.py \
+          --ref "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" \
+          --job "$CI_JOB_NAME" \
+          --path "$OSA_REPORT_DIR/security-report.json" \
+          --output "$OSA_REPORT_DIR/baseline/security-report.json"
+        SCOPE_ARGS="$SCOPE_ARGS --merge-request --baseline $OSA_REPORT_DIR/baseline/security-report.json --baseline-ref $CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      fi
+      python $OSA_HOME/scripts/aggregate_report.py \
+        --input-dir $OSA_REPORT_DIR \
+        --policy $OSA_CONFIG_DIR/policy-global.yml \
+        --output-dir $OSA_REPORT_DIR \
+        --source-dir . \
+        --expect "$EXPECT" \
+        $SCOPE_ARGS
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/security-report.json
+      - $[[ inputs.OSA_REPORT_DIR ]]/security-report.md
+
+# =============================================================================
+# RENDERING — after the verdict, whatever it is
+#
+# Separate jobs rather than last steps of osa_report_aggregate: that job
+# exits 1 whenever the gate blocks, and GitLab stops a `script:` at its
+# first failing command. `when: always` runs them whatever the verdict
+# (they never affect it); allow_failure keeps a rendering failure from
+# adding a red job. When osa_report_aggregate never ran (skipped after an
+# earlier failure), they stop early, successfully: nothing to render.
+# =============================================================================
+.osa_after_gate:
+  extends: .osa_python
+  needs: ["osa_report_aggregate$[[ inputs.OSA_JOB_SUFFIX ]]"]
+  allow_failure: true
+  before_script:
+    - |
+      if [ ! -f "$OSA_REPORT_DIR/security-report.json" ]; then
+        echo "No $OSA_REPORT_DIR/security-report.json: osa_report_aggregate did not produce one (see the jobs before it) - nothing to render."
+        exit 0
+      fi
+
+# --- HTML dashboard, linked from the MR pipeline widget ----------------------
+# A single-file artifact exposed with expose_as: with GitLab Pages enabled on
+# the instance, the link opens the dashboard rendered in the browser (access
+# follows the project's Pages visibility). Outside an MR: job page > Browse.
+osa_report_dashboard$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_after_gate
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_DASHBOARD ]]" != "true"'
+      when: never
+    - when: always
+  script:
+    - |
+      python $OSA_HOME/scripts/generate_dashboard.py \
+        --reports-root $OSA_REPORT_DIR \
+        --output $OSA_REPORT_DIR/dashboard.html
+  artifacts:
+    when: always
+    expire_in: 90 days
+    expose_as: "OSS security dashboard"
+    paths:
+      - $[[ inputs.OSA_REPORT_DIR ]]/dashboard.html
+
+# --- GitLab native reports (MR "Reports" tab) --------------------------------
+# Same findings as the gate and the dashboard:
+#   - dependency_scanning (Grype + OSV, deduplicated) and secret_detection
+#     (Gitleaks) -> Security scan, Vulnerability Report. Ultimate only.
+#   - codequality (SAST, secrets, IaC) -> Code Quality. Every edition.
+# Without Ultimate nothing breaks: the Ultimate-only files are uploaded and
+# never displayed.
+osa_report_gitlab_native$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_after_gate
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_GITLAB_REPORTS ]]" != "true"'
+      when: never
+    - when: always
+  script:
+    - |
+      python $OSA_HOME/scripts/gitlab_reports.py \
+        --report $OSA_REPORT_DIR/security-report.json \
+        --output-dir $OSA_REPORT_DIR
+  artifacts:
+    when: always
+    expire_in: 30 days
+    reports:
+      dependency_scanning: $[[ inputs.OSA_REPORT_DIR ]]/gl-dependency-scanning-report.json
+      secret_detection: $[[ inputs.OSA_REPORT_DIR ]]/gl-secret-detection-report.json
+      codequality: $[[ inputs.OSA_REPORT_DIR ]]/gl-code-quality-report.json
+
+# --- Summary comment on the merge request ------------------------------------
+# One comment per MR, updated by every pipeline (mr_comment.py). Writing a
+# note needs more than CI_JOB_TOKEN: a project access token in the masked
+# OSA_GITLAB_TOKEN variable. Without it the job warns and stays green. After
+# the dashboard, whose artifact the comment links to.
+osa_report_mr_comment$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_after_gate
+  needs:
+    - job: osa_report_aggregate$[[ inputs.OSA_JOB_SUFFIX ]]
+    - job: osa_report_dashboard$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+      artifacts: false
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_MR_COMMENT ]]" != "true" || $CI_PIPELINE_SOURCE != "merge_request_event"'
+      when: never
+    - when: always
+  script:
+    - |
+      python $OSA_HOME/scripts/mr_comment.py \
+        --report $OSA_REPORT_DIR/security-report.json \
+        --dashboard-job "osa_report_dashboard$[[ inputs.OSA_JOB_SUFFIX ]]" \
+        --dashboard-path "$OSA_REPORT_DIR/dashboard.html" \
+        --suffix="$[[ inputs.OSA_JOB_SUFFIX ]]"
+
+# =============================================================================
+# OPTIONAL — dashboard as a `public/` artifact, default branch only
+#
+# Not named `pages`: GitLab allows one `pages` job per pipeline, and a
+# project's own `pages` job would silently replace an included one. Pull
+# this job's artifact into your own `pages` job instead:
+#
+#   pages:
+#     needs:
+#       - job: osa_pages
+#         optional: true
+#     script:
+#       # First: the artifact lands as public/index.html, the site's root page.
+#       - mkdir -p public/security && mv public/index.html public/security/ || true
+#       - ...  # then your own site build into public/
+#
+# The dashboard lists the detected vulnerabilities and (redacted) secrets:
+# check your Pages visibility before enabling this.
+# =============================================================================
+osa_pages$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_python
+  needs: ["osa_report_dashboard$[[ inputs.OSA_JOB_SUFFIX ]]"]
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_PAGES ]]" != "true" || "$[[ inputs.OSA_ENABLE_DASHBOARD ]]" != "true"'
+      when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+    - when: on_success
+  script:
+    - mkdir -p public
+    - cp $OSA_REPORT_DIR/dashboard.html public/index.html || echo "Dashboard missing - nothing to publish."
+  artifacts:
+    paths:
+      - public
+
+# =============================================================================
+# OPTIONAL — Dependency-Track: continuous monitoring of the SBOM
+# Dependency-Track re-scans the SBOM on every vulnerability database update:
+# a CVE published tomorrow on a component shipped today surfaces without a
+# new build. The API key stays a masked CI/CD variable (DTRACK_API_KEY): an
+# input would be readable in the pipeline configuration.
+# =============================================================================
+osa_dtrack_upload$[[ inputs.OSA_JOB_SUFFIX ]]:
+  extends: .osa_job
+  image: $[[ inputs.OSA_CURL_IMAGE ]]
+  needs:
+    - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
+    - job: osa_sbom_merge$[[ inputs.OSA_JOB_SUFFIX ]]
+      optional: true
+  rules:
+    - if: *osa_skip
+      when: never
+    - if: '"$[[ inputs.OSA_ENABLE_DTRACK ]]" != "true" || "$[[ inputs.OSA_DTRACK_URL ]]" == ""'
+      when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_COMMIT_TAG == null
+      when: never
+    - when: on_success
+  script:
+    - |
+      curl -sSf -X POST "$[[ inputs.OSA_DTRACK_URL ]]/api/v1/bom" \
+        -H "X-Api-Key: $DTRACK_API_KEY" \
+        -F "autoCreate=true" \
+        -F "projectName=$CI_PROJECT_PATH" \
+        -F "projectVersion=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}" \
+        -F "bom=@$OSA_SBOM"

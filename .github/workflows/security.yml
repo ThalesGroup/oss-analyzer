@@ -1,0 +1,698 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# =============================================================================
+#  Code analysis suite — vulnerabilities, secrets, and licenses
+#  100% Open Source. No SaaS required (except the Semgrep rules registry,
+#  which can be self-hosted locally — see security/README.md).
+#
+#  This is the GitHub Actions counterpart of the GitLab CI/CD component — same
+#  tools, same settings files, same Python scripts under security/scripts/,
+#  same settings behavior: the `prepare` job resolves oss-analyzer's
+#  organization defaults completed by the caller's settings folder
+#  (`settings-dir`, each policy-* file optional — see the README's
+#  "Customizing oss-analyzer"), as the component's osa_prepare does. Only the
+#  CI-platform glue differs, and the scanner images: public `:latest` tags
+#  here, versions pinned and tested on the GitLab side.
+#  Every scanner runs via a plain `docker run` in a `run:` step rather than
+#  `uses: docker://image` — the latter only accepts the image's own
+#  ENTRYPOINT plus args, with no way to override the entrypoint (needed for
+#  Grype's :debug tag) or to control user/workdir mounts precisely.
+#
+#  Reusable workflow. Calling it from another repository: the jobs check
+#  out oss-analyzer itself (scripts, defaults) next to the caller's code, so
+#  the caller needs no copy of security/scripts/. Tell them where it is,
+#  with the same ref as in `uses:` (GitHub gives a called workflow no
+#  reliable way to know its own repository and ref):
+#     jobs:
+#       security:
+#         uses: ThalesGroup/oss-analyzer/.github/workflows/security.yml@<ref>
+#         with:
+#           oss-analyzer-repository: ThalesGroup/oss-analyzer
+#           oss-analyzer-ref: <ref>
+#  A public oss-analyzer needs nothing more: the jobs check it out with the
+#  caller's GITHUB_TOKEN. That token only reads the caller's own repository,
+#  so a private or internal oss-analyzer needs two things:
+#   - its Settings > Actions > Access granting the caller, for `uses:` to
+#     find this workflow — that does not let the jobs check it out;
+#   - a token able to read it (fine-grained PAT with Contents: read on
+#     oss-analyzer alone, or a GitHub App token), stored as a secret of the
+#     caller and passed on, next to `with:`:
+#         secrets:
+#           OSS_ANALYZER_TOKEN: ${{ secrets.OSS_ANALYZER_TOKEN }}
+#  From oss-analyzer's own repository, leave both inputs empty: the commit
+#  under analysis is used — see security-caller.yml.
+# =============================================================================
+
+on:
+  workflow_call:
+    inputs:
+      # Where oss-analyzer's scripts and defaults come from (see the header):
+      # empty means the calling repository itself, at the analyzed commit.
+      oss-analyzer-repository:
+        type: string
+        default: ""
+      oss-analyzer-ref:
+        type: string
+        default: ""
+      # The caller's settings folder, same as the CI/CD component's
+      # OSA_SETTINGS_DIR: policy-global.yml, policy-licenses.yml,
+      # policy-semgrep.yml, policy-gitleaks.toml, each optional, completing
+      # oss-analyzer's defaults.
+      settings-dir:
+        type: string
+        default: "security"
+      report-dir:
+        type: string
+        default: "security-reports"
+      # Set to a built image ref to also run Trivy's image scan (the
+      # component's OSA_CONTAINER_IMAGE).
+      container-image:
+        type: string
+        default: ""
+      # OWASP cdxgen image (JDK + Maven/Gradle bundled) used for the Java SBOM.
+      # Same image as the CI/CD component's default. When it cannot be
+      # pulled (e.g. a registry mirror unreachable from GitHub-hosted
+      # runners), the job falls back to cdxgen-fallback-image.
+      cdxgen-image:
+        type: string
+        default: "ghcr.io/cyclonedx/cdxgen:13.3.0"
+      cdxgen-fallback-image:
+        type: string
+        default: "ghcr.io/cyclonedx/cdxgen:latest"
+    secrets:
+      # Read access to a non-public oss-analyzer repository (see the header).
+      OSS_ANALYZER_TOKEN:
+        required: false
+
+env:
+  REPORT_DIR: ${{ inputs.report-dir }}
+  SETTINGS_DIR: ${{ inputs.settings-dir }}
+  # oss-analyzer's checkout (scripts, defaults) and the resolved settings.
+  OSA_HOME: .oss-analyzer
+  OSA_CONFIG_DIR: ${{ inputs.report-dir }}/.osa
+
+jobs:
+  # =============================================================================
+  # PREPARE — the settings every later job reads from $OSA_CONFIG_DIR, as the
+  # CI/CD component's osa_prepare: oss-analyzer's defaults completed by the
+  # caller's settings-dir files (prepare_settings.py; its log says where each
+  # facet comes from). Published as the osa-settings artifact.
+  # =============================================================================
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # oss-analyzer's scripts and organization defaults, next to the caller's
+      # code (see "Calling it from another repository" in the header).
+      - name: Check out oss-analyzer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.oss-analyzer-repository || github.repository }}
+          ref: ${{ inputs.oss-analyzer-ref || (inputs.oss-analyzer-repository == '' && github.sha) || '' }}
+          path: .oss-analyzer
+          # The caller's GITHUB_TOKEN when no OSS_ANALYZER_TOKEN is passed
+          # (see the header); not kept in .git/config for later steps.
+          token: ${{ secrets.OSS_ANALYZER_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install --quiet --no-cache-dir pyyaml
+      - name: Resolve the settings
+        run: |
+          python "$OSA_HOME/security/scripts/prepare_settings.py" \
+            --defaults "$OSA_HOME/security" \
+            --settings-dir "$SETTINGS_DIR" \
+            --output-dir "$OSA_CONFIG_DIR"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osa-settings
+          path: ${{ inputs.report-dir }}/.osa/
+          # .osa is a hidden folder: upload-artifact skips those by default.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # =============================================================================
+  # STEP 1 — SBOM: single inventory that feeds everything else
+  #
+  # Syft alone only reads manifests as text (pom.xml, build.gradle, ...): it
+  # never resolves a real Maven/Gradle dependency graph, so it misses every
+  # transitive dependency pulled in through a parent/BOM import, and reports
+  # "UNKNOWN" for a version that's only ever set by an imported BOM rather
+  # than written in the project's own files. On a Spring-Boot-shaped
+  # multi-module project this isn't a marginal gap: measured locally, Syft's
+  # SBOM for such a project fed 0 findings to Grype, against 94 (8 Critical)
+  # from a cdxgen SBOM built with a real `mvn` resolution.
+  #
+  # So: Syft still runs unconditionally (fast, zero-config, covers every
+  # other ecosystem). sbom-cdxgen-java runs in addition, only when a
+  # pom.xml/build.gradle(.kts) is found, and drives the real build tool for
+  # a resolved graph. sbom-merge combines both into the single sbom.cdx.json
+  # every other job in this workflow reads — no other job needs to change.
+  # =============================================================================
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM (Syft)
+        run: |
+          mkdir -p "$REPORT_DIR"
+          # Run as the runner's own uid: as root (the image default) the
+          # reports would be root-owned and the chmod below would fail.
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src anchore/syft:latest \
+            scan dir:. \
+            --exclude './node_modules/**' --exclude './target/debug/**' --exclude './.git/**' \
+            -o cyclonedx-json="$REPORT_DIR/sbom.syft.cdx.json" \
+            -o spdx-json="$REPORT_DIR/sbom.spdx.json" \
+            -o table
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-syft
+          path: ${{ inputs.report-dir }}/
+          retention-days: 90
+
+  # --- Java/Maven/Gradle: real dependency-graph resolution via cdxgen -------
+  # Only runs when a Maven or Gradle manifest is present anywhere in the
+  # repo. cdxgen drives the actual build tool (mvn/gradle) to resolve the
+  # real dependency tree, including transitives pulled in via a parent
+  # POM's <dependencyManagement>/BOM import — exactly what Syft's static
+  # pom.xml read cannot see. Needs network access to the same Maven/Gradle
+  # repository the project itself builds against.
+  #
+  # cdxgen invokes the project's own build, so build-time plugins can read
+  # the job's environment — unset/scope down any credential not needed here
+  # (see cdxgen's own "Secure Mode" audit, which flags exactly this).
+  sbom-cdxgen-java:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check a Maven/Gradle manifest exists
+        id: has-java-build
+        run: |
+          if find . -iname pom.xml -o -iname build.gradle -o -iname build.gradle.kts | grep -q .; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: cdxgen scan
+        if: steps.has-java-build.outputs.found == 'true'
+        env:
+          CDXGEN_IMAGE: ${{ inputs.cdxgen-image }}
+          CDXGEN_FALLBACK_IMAGE: ${{ inputs.cdxgen-fallback-image }}
+        run: |
+          mkdir -p "$REPORT_DIR"
+          # The image's default user is not the runner's: let it write its report.
+          chmod a+rwx "$REPORT_DIR"
+          image="$CDXGEN_IMAGE"
+          if ! docker pull "$image"; then
+            echo "::warning::cannot pull $image, falling back to $CDXGEN_FALLBACK_IMAGE"
+            image="$CDXGEN_FALLBACK_IMAGE"
+            docker pull "$image"
+          fi
+          docker run --rm -v "$PWD:/app" -w /app \
+            "$image" \
+            -t java -o "/app/$REPORT_DIR/sbom.cdxgen.cdx.json" . || true
+      - uses: actions/upload-artifact@v4
+        if: steps.has-java-build.outputs.found == 'true'
+        with:
+          name: sbom-cdxgen
+          path: ${{ inputs.report-dir }}/sbom.cdxgen.cdx.json
+          if-no-files-found: error
+
+  # --- Merge into the single canonical SBOM every other job reads ----------
+  sbom-merge:
+    runs-on: ubuntu-latest
+    needs: [sbom, sbom-cdxgen-java]
+    if: always()
+    steps:
+      - name: Collect SBOM parts
+        run: mkdir -p "$REPORT_DIR"
+      - uses: actions/download-artifact@v4
+        with: { name: sbom-syft, path: "${{ inputs.report-dir }}" }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: sbom-cdxgen, path: "${{ inputs.report-dir }}" }
+      - name: Merge (or pass through if cdxgen didn't run)
+        run: |
+          if [ -f "$REPORT_DIR/sbom.cdxgen.cdx.json" ]; then
+            docker run --rm -v "$PWD/$REPORT_DIR:/report" cyclonedx/cyclonedx-cli:latest \
+              merge \
+              --input-files /report/sbom.syft.cdx.json /report/sbom.cdxgen.cdx.json \
+              --output-file /report/sbom.cdx.json \
+              --output-format json
+          else
+            cp "$REPORT_DIR/sbom.syft.cdx.json" "$REPORT_DIR/sbom.cdx.json"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ inputs.report-dir }}/
+          retention-days: 90
+
+  # =============================================================================
+  # STEP 2 — SCANS (run in parallel). Every one of these is best-effort:
+  # a scanner failure never blocks the pipeline by itself — that's the gate
+  # job's call, after applying the policy and exceptions. A scanner that
+  # left no report does block there in enforce mode, as a coverage gap
+  # (--expect).
+  # =============================================================================
+  sca-grype:
+    runs-on: ubuntu-latest
+    needs: [sbom-merge]
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: sbom, path: "${{ inputs.report-dir }}" }
+      - name: Grype scan
+        run: |
+          # The default (distroless) `latest` tag ships no shell at all.
+          # The :debug tag is the same binary on a busybox-based image and
+          # puts it at /grype (not on $PATH).
+          # The image runs as nonroot (uid 65532), while the report dir
+          # restored from the SBOM artifact belongs to the runner
+          # (artifacts do not preserve permissions): open it up.
+          chmod -R a+rwX "$REPORT_DIR"
+          docker run --rm -v "$PWD/$REPORT_DIR:/report" \
+            --entrypoint /grype ghcr.io/anchore/grype:debug \
+            sbom:/report/sbom.cdx.json -o json --file /report/grype.json
+      - uses: actions/upload-artifact@v4
+        with: { name: scan-grype, path: "${{ inputs.report-dir }}/grype.json", if-no-files-found: error }
+
+  sca-osv:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: OSV-Scanner
+        run: |
+          mkdir -p "$REPORT_DIR"
+          rc=0
+          docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:latest \
+            scan source --recursive --format json --output "$REPORT_DIR/osv.json" . || rc=$?
+          # Exit code 128 = "No package sources found": nothing for OSV to scan,
+          # which is not a coverage loss, but it writes no file. Leave an empty
+          # result so that the gate (--expect osv) doesn't read it as a missing
+          # report. Any other failure (crash, network) still leaves no report.
+          if [ "$rc" -eq 128 ]; then
+            echo "No package source recognized by OSV-Scanner: nothing to scan."
+            echo '{"results": []}' > "$REPORT_DIR/osv.json"
+          fi
+      - uses: actions/upload-artifact@v4
+        with: { name: scan-osv, path: "${{ inputs.report-dir }}/osv.json", if-no-files-found: error }
+
+  sast-semgrep:
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: osa-settings, path: "${{ inputs.report-dir }}/.osa" }
+      - name: Semgrep scan
+        run: |
+          mkdir -p "$REPORT_DIR"
+          # semgrep/semgrep:latest auto-detects it's running in a container
+          # and then expects the code on a mounted volume
+          # (`-v "${PWD}:/src"`), which we do provide here — but the same
+          # auto-detection broke under GitLab's Kubernetes executor where
+          # no such mount exists. Passing an explicit `.` scan path
+          # sidesteps that detection either way, so it's kept here too for
+          # consistency with the CI/CD component.
+          # Rules resolved by `prepare`, as in the component: the registry
+          # packs (sast.registry_packs), oss-analyzer's rules and the
+          # caller's. `if`, not `[ ] &&`: a loop ending on a false test
+          # would fail the step.
+          CONFIGS=""
+          while read -r pack; do
+            if [ -n "$pack" ]; then CONFIGS="$CONFIGS --config $pack"; fi
+          done < "$OSA_CONFIG_DIR/semgrep-packs.txt"
+          for f in "$OSA_CONFIG_DIR"/semgrep/*.yml; do
+            if [ -f "$f" ]; then CONFIGS="$CONFIGS --config $f"; fi
+          done
+          if [ -z "$CONFIGS" ]; then
+            echo "No Semgrep rule configured (sast.registry_packs empty, no rules file)."
+            echo '{"results": [], "errors": []}' > "$REPORT_DIR/semgrep.json"
+            exit 0
+          fi
+          # shellcheck disable=SC2086 # CONFIGS is a list of --config flags
+          docker run --rm -v "$PWD:/src" -w /src -e SEMGREP_SEND_METRICS=off \
+            semgrep/semgrep:latest semgrep scan $CONFIGS --exclude "$REPORT_DIR" \
+            --metrics off --json --output "$REPORT_DIR/semgrep.json" . || true
+      - uses: actions/upload-artifact@v4
+        with: { name: scan-semgrep, path: "${{ inputs.report-dir }}/semgrep.json", if-no-files-found: error }
+
+  secrets-gitleaks:
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: fetch-depth 0 fetches every branch and tag too.
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with: { name: osa-settings, path: "${{ inputs.report-dir }}/.osa" }
+      - name: Determine scan range
+        id: range
+        # Without --log-opts, gitleaks walks every ref of the clone (git log
+        # --all) — with fetch-depth 0, every branch: a secret on an
+        # unrelated, unmerged branch would surface and could fail a run that
+        # never touched it. So: on a pull_request event, just the commits
+        # this PR introduces (base..head); elsewhere (push to main,
+        # schedule, tag), the whole history of HEAD — which still catches a
+        # secret committed then removed earlier in this branch's history.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "log_opts=--log-opts=${{ github.event.pull_request.base.sha }}..${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "log_opts=--log-opts=HEAD" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Gitleaks scan
+        run: |
+          mkdir -p "$REPORT_DIR"
+          docker run --rm -v "$PWD:/src" -w /src ghcr.io/gitleaks/gitleaks:latest \
+            detect --source . --config "$OSA_CONFIG_DIR/policy-gitleaks.toml" \
+            --report-format json --report-path "$REPORT_DIR/gitleaks.json" \
+            --redact --exit-code 0 --verbose ${{ steps.range.outputs.log_opts }}
+      - uses: actions/upload-artifact@v4
+        with: { name: scan-gitleaks, path: "${{ inputs.report-dir }}/gitleaks.json", if-no-files-found: error }
+
+  containers-trivy:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check a Dockerfile exists
+        id: has-dockerfile
+        run: |
+          # $(...) rather than `| grep -q`: under pipefail, find killed by
+          # SIGPIPE once grep is satisfied would read as "no Dockerfile".
+          if [ -n "$(find . -iname Dockerfile | head -n 1)" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Trivy scans
+        if: steps.has-dockerfile.outputs.found == 'true'
+        env:
+          # inputs.container-image comes from the calling workflow, not from
+          # untrusted PR content — but going through env: instead of
+          # interpolating ${{ }} directly into the shell command is the
+          # pattern GitHub recommends regardless, and keeps Semgrep's
+          # generic github-context-in-run rule quiet.
+          IMAGE_TAG_INPUT: ${{ inputs.container-image }}
+        run: |
+          mkdir -p "$REPORT_DIR"
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:latest \
+            config --format json --output "$REPORT_DIR/trivy-iac.json" . || true
+          if [ -n "$IMAGE_TAG_INPUT" ]; then
+            docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:latest \
+              image --scanners vuln,secret --format json \
+              --output "$REPORT_DIR/trivy-image.json" "$IMAGE_TAG_INPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.has-dockerfile.outputs.found == 'true'
+        with: { name: scan-trivy, path: "${{ inputs.report-dir }}/trivy-*.json" }
+
+  # --- Licenses: REUSE (SPDX headers/copyright per file) --------------------
+  # Distinct from a Trivy license scan: that one detects the license of
+  # *third-party* code (dependencies, vendored fragments); this one checks
+  # that the scanned repo's own files carry a proper SPDX-FileCopyrightText /
+  # SPDX-License-Identifier header, per the REUSE spec
+  # (https://reuse.software/).
+  # This repo (oss-analyzer) applies it itself — LICENSE, LICENSES/, and
+  # per-file headers.
+  #
+  # Always reporting-only, deliberately: this is a sensitization signal for
+  # whatever *other* project this pipeline scans (most won't have adopted
+  # REUSE), not a compliance gate — aggregate_report.py always treats these
+  # findings as non-blocking regardless of policy-global.yml.
+  licenses-reuse:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: REUSE lint
+        run: |
+          mkdir -p "$REPORT_DIR"
+          # Exit code 1 means "not compliant", not a tool failure — same
+          # convention as the other scanners here (osv, semgrep): the
+          # gate job decides what's blocking, not the scanner's own exit code.
+          docker run --rm -v "$PWD:/data" -w /data fsfe/reuse:latest \
+            lint --json > "$REPORT_DIR/reuse.json" || true
+      - uses: actions/upload-artifact@v4
+        with: { name: scan-reuse, path: "${{ inputs.report-dir }}/reuse.json" }
+
+  # --- Licenses: deep (Trivy, file by file) ---------------------------------
+  # Detects the license of *third-party* code found in the files (license
+  # texts and headers of vendored or copy-pasted fragments), unlike REUSE
+  # above which checks the scanned repo's own headers. Slow, so, as on
+  # GitLab (osa_licenses_deep), it only runs on a schedule or on demand —
+  # not on every push/PR. Its report (trivy-licenses.json) is reviewed
+  # manually: not used by the gate.
+  # No dependency license here: offline (below), Trivy gets none for a
+  # pom.xml dependency, nor for Python or Go ones, whose installed packages
+  # or module cache the job doesn't have — 0 for the test project's 3
+  # pom.xml, go.mod and requirements.txt. licenses-gate checks those,
+  # from the SBOM.
+  licenses-deep:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy license scan
+        run: |
+          mkdir -p "$REPORT_DIR"
+          # The image's default user is not the runner's: let it write its report.
+          chmod a+rwx "$REPORT_DIR"
+          # --offline-scan: don't let Trivy resolve pom.xml files against
+          # Maven Central. From GitHub-hosted runners (shared IPs) that gets
+          # throttled (429) and Trivy then exits without writing any report.
+          # GitLab's osa_licenses_deep resolves online, against Maven
+          # Central too (no mirror configured), so it can be throttled the
+          # same way.
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:latest \
+            fs --scanners license --license-full --offline-scan \
+            --format json --output "$REPORT_DIR/trivy-licenses.json" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scan-licenses-deep
+          path: ${{ inputs.report-dir }}/trivy-licenses.json
+          if-no-files-found: error
+
+  # =============================================================================
+  # STEP 3 — GATE: applying the policy
+  # =============================================================================
+  licenses-gate:
+    runs-on: ubuntu-latest
+    needs: [sbom-merge, prepare]
+    continue-on-error: true # verdict is picked up by report-aggregate, the only blocking point
+    steps:
+      # oss-analyzer's scripts and organization defaults, next to the caller's
+      # code (see "Calling it from another repository" in the header).
+      - name: Check out oss-analyzer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.oss-analyzer-repository || github.repository }}
+          ref: ${{ inputs.oss-analyzer-ref || (inputs.oss-analyzer-repository == '' && github.sha) || '' }}
+          path: .oss-analyzer
+          # The caller's GITHUB_TOKEN when no OSS_ANALYZER_TOKEN is passed
+          # (see the header); not kept in .git/config for later steps.
+          token: ${{ secrets.OSS_ANALYZER_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with: { name: sbom, path: "${{ inputs.report-dir }}" }
+      - uses: actions/download-artifact@v4
+        with: { name: osa-settings, path: "${{ inputs.report-dir }}/.osa" }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install --quiet --no-cache-dir pyyaml
+      - run: |
+          python "$OSA_HOME/security/scripts/license_gate.py" \
+            --sbom "$REPORT_DIR/sbom.cdx.json" \
+            --policy "$OSA_CONFIG_DIR/policy-global.yml" \
+            --output-dir "$REPORT_DIR"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: licenses-gate
+          path: |
+            ${{ inputs.report-dir }}/licenses.json
+            ${{ inputs.report-dir }}/licenses.md
+
+  report-aggregate:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - prepare
+      - sbom-merge
+      - licenses-gate
+      - sca-grype
+      - sca-osv
+      - sast-semgrep
+      - secrets-gitleaks
+      - containers-trivy
+      - licenses-reuse
+    outputs:
+      failed: ${{ steps.aggregate.outputs.failed }}
+      blocking: ${{ steps.aggregate.outputs.blocking }}
+    steps:
+      - uses: actions/checkout@v4
+      # oss-analyzer's scripts and organization defaults, next to the caller's
+      # code (see "Calling it from another repository" in the header).
+      - name: Check out oss-analyzer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.oss-analyzer-repository || github.repository }}
+          ref: ${{ inputs.oss-analyzer-ref || (inputs.oss-analyzer-repository == '' && github.sha) || '' }}
+          path: .oss-analyzer
+          # The caller's GITHUB_TOKEN when no OSS_ANALYZER_TOKEN is passed
+          # (see the header); not kept in .git/config for later steps.
+          token: ${{ secrets.OSS_ANALYZER_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install --quiet --no-cache-dir pyyaml
+      - name: Collect every scan's output into one directory
+        run: mkdir -p "$REPORT_DIR"
+      # Each download is best-effort: a scan job that failed before
+      # uploading its artifact leaves that input file missing. For a tool
+      # listed in --expect below, aggregate_report.py reports it as a
+      # missing scanner report, which blocks in enforce mode (coverage
+      # gap) — never as "nothing found".
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: sbom, path: "${{ inputs.report-dir }}" }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: licenses-gate, path: "${{ inputs.report-dir }}" }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { pattern: "scan-*", path: "${{ inputs.report-dir }}", merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { name: osa-settings, path: "${{ inputs.report-dir }}/.osa" }
+      - name: Aggregate + apply policy
+        id: aggregate
+        run: |
+          set +e
+          # Trivy's IaC report is expected when containers-trivy ran, i.e.
+          # when a Dockerfile exists (same test as that job). oss-analyzer's
+          # checkout is skipped: its own Dockerfile is not the caller's, and
+          # containers-trivy, without that checkout, never sees it.
+          EXPECT=grype,osv,semgrep,gitleaks,licenses
+          if [ -n "$(find . -path "./$OSA_HOME" -prune -o -iname Dockerfile -print | head -n 1)" ]; then
+            EXPECT="$EXPECT,trivy"
+          fi
+          python "$OSA_HOME/security/scripts/aggregate_report.py" \
+            --input-dir "$REPORT_DIR" \
+            --policy "$OSA_CONFIG_DIR/policy-global.yml" \
+            --output-dir "$REPORT_DIR" \
+            --source-dir . \
+            --expect "$EXPECT"
+          code=$?
+          set -e
+          cat "$REPORT_DIR/security-report.md"
+          failed=$(python -c "import json;print(str(json.load(open('$REPORT_DIR/security-report.json'))['failed']).lower())")
+          blocking=$(python -c "import json;print(json.load(open('$REPORT_DIR/security-report.json'))['blocking'])")
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "blocking=$blocking" >> "$GITHUB_OUTPUT"
+          exit $code
+      - name: Generate dashboard (best-effort)
+        if: always()
+        run: |
+          python "$OSA_HOME/security/scripts/generate_dashboard.py" \
+            --reports-root "$REPORT_DIR" \
+            --output "$REPORT_DIR/dashboard.html" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-report
+          path: ${{ inputs.report-dir }}/
+          retention-days: 90
+
+  # =============================================================================
+  # STEP 4 — PR feedback: short summary posted as a PR comment, full report
+  # stays available as the security-report artifact above (same split as
+  # GitLab's MR widget vs. downloadable job artifact).
+  # =============================================================================
+  pr-comment:
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'pull_request'
+    needs: [report-aggregate]
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: security-report, path: "${{ inputs.report-dir }}" }
+      - uses: actions/github-script@v7
+        env:
+          # inputs.report-dir comes from the calling workflow, not from
+          # untrusted PR content — but going through env: instead of
+          # interpolating ${{ }} directly into the script is the pattern
+          # GitHub recommends regardless, and keeps Semgrep's generic
+          # github-context-in-script rule quiet.
+          REPORT_DIR_INPUT: ${{ inputs.report-dir }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `${process.env.REPORT_DIR_INPUT}/security-report.json`;
+            if (!fs.existsSync(path)) {
+              return;
+            }
+            const report = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const icon = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵', unknown: '❔' };
+            const rows = Object.entries(report.by_severity || {})
+              .map(([sev, n]) => `| ${icon[sev] || ''} ${sev} | ${n} |`).join('\n');
+            const verdict = report.failed ? '❌ **Blocked**' : '✅ **OK**';
+            const body = [
+              '## 🛡️ Security report',
+              '',
+              `${verdict} — ${report.blocking} blocking finding(s)` +
+                (report.coverage_blocking ? ` + ${report.coverage_blocking} missing scanner report(s)` : '') + '.',
+              '',
+              '| Severity | Count |',
+              '|---|---|',
+              rows,
+              '',
+              'Full report: see the `security-report` artifact on this workflow run.',
+            ].join('\n');
+
+            const marker = '<!-- security-report-comment -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            const finalBody = `${marker}\n${body}`;
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body: finalBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body: finalBody,
+              });
+            }
+
+  # =============================================================================
+  # STEP 5 — Enforce the gate. report-aggregate itself already exits non-zero
+  # on a policy violation, but that job runs with `if: always()` so a required
+  # status check on it alone wouldn't reliably block a PR whose earlier jobs
+  # failed outright. This tiny job is what you point branch protection at.
+  # =============================================================================
+  gate:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [report-aggregate]
+    steps:
+      - name: Check policy verdict
+        run: |
+          if [ "${{ needs.report-aggregate.outputs.failed }}" = "true" ]; then
+            echo "::error:: ${{ needs.report-aggregate.outputs.blocking }} blocking finding(s) and/or missing scanner reports — see the security-report artifact."
+            exit 1
+          fi
+          echo "Policy OK."

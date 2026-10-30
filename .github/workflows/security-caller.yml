@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# Example caller. If you already have your own workflow(s), only take the
+# `jobs: security:` block below and add it to yours — the reusable workflow
+# is what does the actual work (see security.yml).
+name: Security
+
+on:
+  pull_request:
+  # Manual run from the Actions tab (also runs the heavy licenses-deep job).
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly full analysis: detects CVEs published since the last run, and
+    # triggers the heavy jobs. Equivalent to the GitLab CI/CD > Schedules
+    # entry (cron: 0 3 * * 1, Monday 3am) mentioned in .gitlab-ci.yml.
+    - cron: "0 3 * * 1"
+
+jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+    # From another repo, instead use (same <ref> in both places):
+    #   uses: ThalesGroup/oss-analyzer/.github/workflows/security.yml@<ref>
+    #   with:
+    #     oss-analyzer-repository: ThalesGroup/oss-analyzer
+    #     oss-analyzer-ref: <ref>
+    #   # Only for a private or internal oss-analyzer (see security.yml):
+    #   secrets:
+    #     OSS_ANALYZER_TOKEN: ${{ secrets.OSS_ANALYZER_TOKEN }}
+    permissions:
+      contents: read
+      pull-requests: write

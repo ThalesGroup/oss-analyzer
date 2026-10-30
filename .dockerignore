@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# The image only needs security/ (see Dockerfile): keep the build context small.
+*
+!security/scripts/*.py
+!security/scripts/requirements.txt
+!security/policy-*.yml
+!security/policy-*.toml

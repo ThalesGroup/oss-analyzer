@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# =============================================================================
+#  Policy of the license fixture (sbom-fixture.cdx.json): its own license
+#  lists, so that the expected verdicts (sbom-fixture.expected.json) test
+#  license_gate.py alone, whatever the organization's lists
+#  (security/policy-licenses.yml) say. No policy-licenses.yml next to it:
+#  nothing else is pulled in.
+# =============================================================================
+
+meta:
+  version: 1
+
+licenses:
+  unknown: review
+  fail_on_deny: true
+  fail_on_review: false
+  allow:
+    - "MIT"
+    - "Apache-2.0"
+    # A listed name holding "or": matched whole, not split as an expression.
+    - "MATPLOTLIB License 1.3.0 or Later"
+  review:
+    - "GPL-2.0-only"
+    - "GPL-2.0-or-later"
+    - "LGPL-2.1-only"
+    - "MPL-2.0"
+    - "GPL-3.0-only"
+    - "AGPL-3.0-only"
+    - "SSPL-1.0"
+  deny:
+    - "CC-BY-NC-4.0"

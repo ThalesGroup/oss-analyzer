@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# oss-analyzer's Gitleaks configuration — extends Gitleaks' default ruleset.
+# A project's own security/policy-gitleaks.toml extends this one (the CI/CD
+# component adds the `[extend] path`, so that file must not have an
+# [extend] of its own); `secrets.inherit_rules: false` in its
+# policy-global.yml uses it alone instead.
+# Docs: https://github.com/gitleaks/gitleaks
+
+title = "Secrets policy"
+
+[extend]
+useDefault = true
+
+# --- In-house rules -----------------------------------------------------------
+
+[[rules]]
+id = "pkcs8-private-key"
+description = "PKCS#8 private key in clear text"
+regex = '''-----BEGIN(?: (?:RSA|EC|DSA|OPENSSH|PGP))? PRIVATE KEY-----'''
+tags = ["key"]
+
+[[rules]]
+id = "jdbc-url-with-password"
+description = "JDBC connection string containing a password"
+regex = '''jdbc:[a-z0-9]+://[^\s"']*[?&](?i)password=[^\s"'&]{4,}'''
+tags = ["database"]
+
+[[rules]]
+id = "dotenv-hardcoded-secret"
+description = "Hardcoded secret value in an environment file"
+path = '''(?i)\.env(\.[a-z0-9_-]+)?$'''
+regex = '''(?i)^\s*[A-Z0-9_]*(SECRET|PASSWORD|TOKEN|APIKEY|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*["']?[^\s"'#$<{][^\s"'#]{7,}'''
+tags = ["dotenv"]
+
+# --- Global exclusions -------------------------------------------------------
+# Golden rule: only exclude what structurally cannot contain a real
+# secret. Every addition here is a permanent blind spot.
+
+[allowlist]
+description = "Known false positives"
+
+paths = [
+  '''(^|/)(node_modules|vendor|target|dist|build|\.venv|venv)/''',
+  '''(^|/)(go\.sum|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock)$''',
+  '''(^|/)testdata/''',
+  '''\.(png|jpe?g|gif|svg|ico|pdf|woff2?|ttf|min\.js|map)$''',
+  # The Gitleaks settings files themselves (their regexes look like secrets),
+  # wherever the project keeps its settings folder.
+  '''(^|/)policy-gitleaks(\.base)?\.toml$''',
+]
+
+regexes = [
+  # Obviously fake values
+  '''(?i)(example|sample|dummy|placeholder|changeme|your[-_]?(api[-_]?)?key|xxxxx+|<[a-z_]+>)''',
+  # Public Stripe test keys
+  '''sk_test_[0-9a-zA-Z]{24,}''',
+  # Null UUID
+  '''00000000-0000-0000-0000-000000000000''',
+]
+
+# Example of a targeted exclusion by commit hash — prefer this over a
+# path exclusion when it's a unique, historical case:
+# stopwords = []
+# commits = ["a1b2c3d4e5f6..."]
