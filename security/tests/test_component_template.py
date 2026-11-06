@@ -119,6 +119,17 @@ class GraphTest(unittest.TestCase):
         self.assertEqual(used, set(self.spec["inputs"]))
         self.assertTrue(all(i.startswith("OSA_") for i in self.spec["inputs"]))
 
+    def test_tool_images_run_without_their_entrypoint(self):
+        # Under the Docker executor, a tool's ENTRYPOINT would get the job's
+        # shell as its subcommand ("unknown command sh"): trivy, reuse...
+        own = "$[[ inputs.OSA_IMAGE_REPOSITORY ]]:$[[ component.sha ]]"
+        for name, job in self.jobs.items():
+            image = job.get("image")
+            if image is None or image == own:
+                continue
+            self.assertIsInstance(image, dict, f"{name}: {image}")
+            self.assertEqual(image.get("entrypoint"), [""], name)
+
     def test_infrastructure_failures_are_retried_not_script_failures(self):
         retry = self.raw[".osa_job"]["retry"]
         self.assertNotIn("script_failure", retry["when"])

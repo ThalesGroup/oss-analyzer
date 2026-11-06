@@ -12,6 +12,20 @@ breaking change bumps the minor version).
 ## Unreleased
 
 
+## 0.4.2
+
+The component works on the Docker executor. No input or setting to
+change: `@0.4` picks it up.
+
+### Fixed
+
+- The component runs on the Docker executor (gitlab.com's shared runners,
+  most self-managed runners): every tool image is used with
+  `entrypoint: [""]`. `osa_containers_trivy`, `osa_licenses_reuse` and
+  `osa_licenses_deep` failed there ("unknown command sh": the job's shell
+  was passed to the tool's ENTRYPOINT), which blocked the gate on a
+  missing report; cdxgen and cyclonedx-cli were exposed the same way.
+
 ## 0.4.1
 
 The component published on gitlab.com, and tests on GitHub pull

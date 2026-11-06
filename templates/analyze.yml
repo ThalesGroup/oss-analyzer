@@ -230,6 +230,12 @@ spec:
     SEMGREP_SEND_METRICS: "off"
     ANCHORE_DISABLE_UPDATE_CHECK: "true"
 
+# Tool images: every job runs its script in a shell, so each tool image is
+# used with `entrypoint: [""]`. Most of them set their tool as ENTRYPOINT
+# (trivy, reuse, cdxgen...): the Docker executor would run the job's shell
+# as that tool's subcommand ("unknown command sh") — the Kubernetes
+# executor doesn't, which hides it.
+
 # Scanners: never block, the gate decides.
 # Every job publishes only the files it writes (each scanner lists its
 # `artifacts: paths`): a job downstream gets each file from the job that
@@ -379,7 +385,9 @@ osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]:
 # (GitLab masks the base64 form), like every credential this job sees.
 osa_sbom_cdxgen$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_job
-  image: $[[ inputs.OSA_CDXGEN_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_CDXGEN_IMAGE ]]
+    entrypoint: [""]
   needs:
     - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
       artifacts: false
@@ -447,7 +455,9 @@ osa_sbom_cdxgen$[[ inputs.OSA_JOB_SUFFIX ]]:
 # writes sbom.cdx.json itself.
 osa_sbom_merge$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_job
-  image: $[[ inputs.OSA_CYCLONEDX_CLI_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_CYCLONEDX_CLI_IMAGE ]]
+    entrypoint: [""]
   needs:
     - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
     - job: osa_sbom_cdxgen$[[ inputs.OSA_JOB_SUFFIX ]]
@@ -565,7 +575,9 @@ osa_sca_osv$[[ inputs.OSA_JOB_SUFFIX ]]:
 # checked out directly in the container.
 osa_sast_semgrep$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_scan
-  image: $[[ inputs.OSA_SEMGREP_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_SEMGREP_IMAGE ]]
+    entrypoint: [""]
   needs: ["osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]"]
   rules:
     - if: *osa_skip
@@ -647,7 +659,9 @@ osa_secrets_gitleaks$[[ inputs.OSA_JOB_SUFFIX ]]:
 # --- Containers / IaC: Trivy (only if a Dockerfile exists) -------------------
 osa_containers_trivy$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_scan
-  image: $[[ inputs.OSA_TRIVY_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_TRIVY_IMAGE ]]
+    entrypoint: [""]
   needs:
     - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
       artifacts: false
@@ -675,7 +689,9 @@ osa_containers_trivy$[[ inputs.OSA_JOB_SUFFIX ]]:
 # with no package metadata, beyond what the SBOM declares.
 osa_licenses_deep$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_scan
-  image: $[[ inputs.OSA_TRIVY_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_TRIVY_IMAGE ]]
+    entrypoint: [""]
   needs:
     - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
       artifacts: false
@@ -704,7 +720,9 @@ osa_licenses_deep$[[ inputs.OSA_JOB_SUFFIX ]]:
 # signal, never blocking whatever the policy.
 osa_licenses_reuse$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_scan
-  image: $[[ inputs.OSA_REUSE_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_REUSE_IMAGE ]]
+    entrypoint: [""]
   needs:
     - job: osa_prepare$[[ inputs.OSA_JOB_SUFFIX ]]
       artifacts: false
@@ -959,7 +977,9 @@ osa_pages$[[ inputs.OSA_JOB_SUFFIX ]]:
 # =============================================================================
 osa_dtrack_upload$[[ inputs.OSA_JOB_SUFFIX ]]:
   extends: .osa_job
-  image: $[[ inputs.OSA_CURL_IMAGE ]]
+  image:
+    name: $[[ inputs.OSA_CURL_IMAGE ]]
+    entrypoint: [""]
   needs:
     - job: osa_sbom_generate$[[ inputs.OSA_JOB_SUFFIX ]]
     - job: osa_sbom_merge$[[ inputs.OSA_JOB_SUFFIX ]]
