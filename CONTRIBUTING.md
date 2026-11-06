@@ -19,6 +19,12 @@ the detailed history. So that both repositories never diverge, `main`
 only moves through those syncs. A pull request is never merged here,
 even when it's accepted.
 
+The [GitLab](https://gitlab.com/gitlab-org/gitlab) project
+[gitlab.com/thalesgroup/oss-analyzer](https://gitlab.com/thalesgroup/oss-analyzer),
+which serves the CI/CD component and its image, is a read-only copy of
+this repository, updated with each sync: issues and pull requests go
+here.
+
 ### Roles
 
 - **Maintainers** review issues and pull requests, integrate accepted
@@ -111,7 +117,7 @@ python data/test/check_license_fixture.py \
 ### Issues management
 
 - Search the existing issues before opening one.
-- A bug report says the oss-analyzer version, the platform ([GitLab](https://gitlab.com/gitlab-org/gitlab)
+- A bug report says the oss-analyzer version, the platform (GitLab
   component, GitHub workflow or local script), what happened and what
   was expected, with the relevant job log.
 - **Security issues** never go in a public issue: see

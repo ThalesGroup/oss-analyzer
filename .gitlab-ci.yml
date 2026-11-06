@@ -8,7 +8,7 @@
 # version instead of $CI_COMMIT_SHA, e.g.:
 #
 #   include:
-#     - component: $CI_SERVER_FQDN/thalesgroup/oss-analyzer/analyze@0.4
+#     - component: gitlab.com/thalesgroup/oss-analyzer/analyze@0.4
 
 include:
   - component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/analyze@$CI_COMMIT_SHA
@@ -161,6 +161,7 @@ release:
       Include it with
       `- component: $CI_SERVER_FQDN/$CI_PROJECT_PATH/analyze@$CI_COMMIT_TAG`.
       Report scripts image: `$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG`.
+
 
 # ---------------------------------------------------------------------------
 # Scheduled full analysis: detects CVEs published since the last build,

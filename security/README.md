@@ -456,7 +456,7 @@ python security/scripts/build_license_catalog.py --policy security/policy-global
 
   ```yaml
   include:
-    - component: $CI_SERVER_FQDN/thalesgroup/oss-analyzer/analyze@0.4
+    - component: gitlab.com/thalesgroup/oss-analyzer/analyze@0.4
       inputs:
         OSA_MAVEN_MIRROR_URL: https://repo.example.com/maven2
   variables:

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026 THALES
+#
+# SPDX-License-Identifier: MIT
+
+# oss-analyzer's own tests, on every pull request and on main: the unit
+# tests of security/tests, and the license test (the license gate on a
+# fixture SBOM, whose verdicts must match the expected ones). The same
+# checks as the GitLab pipeline's test:unit and test:license-gate jobs.
+# The analysis of this repository itself is security-caller.yml.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Dependencies
+        run: pip install -r security/scripts/requirements.txt
+      - name: Unit tests
+        run: python -m unittest discover -s security/tests -v
+      - name: License test
+        run: |
+          run_gate() {  # <output dir>
+            python security/scripts/license_gate.py \
+              --sbom data/test/sbom-fixture.cdx.json \
+              --policy data/test/policy-fixture.yml \
+              --output-dir "$1" > /dev/null
+          }
+          if run_gate "$RUNNER_TEMP/enforce"; then
+            echo "::error::enforce: the gate should have failed"
+            exit 1
+          fi
+          OSA_MODE=audit run_gate "$RUNNER_TEMP/audit"
+          python data/test/check_license_fixture.py \
+            "$RUNNER_TEMP/enforce/licenses.json" "$RUNNER_TEMP/audit/licenses.json" \
+            data/test/sbom-fixture.expected.json

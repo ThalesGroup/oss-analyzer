@@ -130,7 +130,7 @@ spec:
 
     # --- Images ---------------------------------------------------------------
     OSA_IMAGE_REPOSITORY:
-      default: $CI_REGISTRY/thalesgroup/oss-analyzer
+      default: registry.gitlab.com/thalesgroup/oss-analyzer
       description: Repository of the oss-analyzer image (report scripts). Its tag is always the component's commit SHA, so the scripts match the component version.
     OSA_SYFT_IMAGE:
       # -debug: the distroless tag has no shell, which a GitLab job needs.

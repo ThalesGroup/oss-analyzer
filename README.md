@@ -49,10 +49,16 @@ Three ways to run it, with the same policy and the same report:
 
 ```yaml
 include:
-  - component: $CI_SERVER_FQDN/thalesgroup/oss-analyzer/analyze@0.4
+  - component: gitlab.com/thalesgroup/oss-analyzer/analyze@0.4
 ```
 
-That's all. The analysis runs in the `test` stage on merge requests, the
+That's all, on gitlab.com: the component is published in its CI/CD
+Catalog from [gitlab.com/thalesgroup/oss-analyzer](https://gitlab.com/thalesgroup/oss-analyzer),
+a read-only copy of this repository. On a self-managed instance, which
+can only include its own projects, mirror that project there and include
+it by its path on your instance; its image stays on
+`registry.gitlab.com/thalesgroup/oss-analyzer` (`OSA_IMAGE_REPOSITORY`),
+tagged with the component's commit SHA. The analysis runs in the `test` stage on merge requests, the
 default branch, schedules and tags; `osa_report_aggregate` is the only job
 that can block. The dashboard is linked as **OSS security dashboard** in
 the MR pipeline widget, and the MR's Reports tab shows the findings
